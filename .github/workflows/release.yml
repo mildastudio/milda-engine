@@ -1,12 +1,12 @@
 name: Publish
 
-# Publishes the @mildastudio/* packages to npm. Trigger by publishing a GitHub
-# Release, or manually. Requires the NPM_TOKEN secret.
+# Publishes the @mildastudio/* packages to npm via TRUSTED PUBLISHING (OIDC) — no
+# token. One-time setup on npmjs.com: each package must exist (do the first publish
+# manually), then add this repo + workflow (release.yml) as a Trusted Publisher on
+# EACH of @mildastudio/core, contract, generate, release.
 #
-# ORDER: `milda` must already be published (from milda-lang) — these packages
-# depend on it, so `npm install` resolves it from the registry. Until then this
-# workflow (and CI) will fail at install; that is expected before the first
-# milda-lang publish.
+# ORDER: @mildastudio/milda must already be published (from milda-lang) — these
+# packages depend on it.
 
 on:
   release:
@@ -18,15 +18,13 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      id-token: write # npm provenance
+      id-token: write # OIDC trusted publishing + provenance
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
-          registry-url: https://registry.npmjs.org
+          node-version: 24
+      - run: npm install -g npm@latest # trusted publishing needs npm >= 11.5.1
       - run: npm install
       - run: npm run build
       - run: npm publish -w @mildastudio/core -w @mildastudio/contract -w @mildastudio/generate -w @mildastudio/release --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
