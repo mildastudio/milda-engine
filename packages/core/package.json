@@ -2,6 +2,11 @@
   "name": "@mildastudio/core",
   "version": "0.1.0",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mildastudio/milda-engine.git",
+    "directory": "packages/core"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
