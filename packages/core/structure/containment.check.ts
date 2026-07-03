@@ -1,5 +1,5 @@
-import { preludeV0 } from 'milda'
-import type { AnatomyPart, PartRole } from 'milda'
+import { preludeV0 } from '@mildastudio/milda'
+import type { AnatomyPart, PartRole } from '@mildastudio/milda'
 import { canContain, type ContainmentChild } from './containment'
 import type { ComponentNode, NodeKind } from './types'
 

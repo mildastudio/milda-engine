@@ -99,3 +99,8 @@ export { themeCss } from './targets/react/theme'
 
 export { figmaFoundationsExport } from './targets/figma'
 export type { FigmaExportFormat, FigmaExportResult } from './targets/figma'
+
+export { documentToDsl } from './targets/dsl/emit'
+export type { DslDocumentInput } from './targets/dsl/emit'
+export { foundationsToIr, componentToIr, documentToIr } from './targets/dsl/toIr'
+export type { FoundationsToIrResult, ComponentToIrResult, DocumentToIrResult } from './targets/dsl/toIr'

@@ -1,4 +1,4 @@
-import { archetypesByName } from 'milda'
+import { archetypesByName } from '@mildastudio/milda'
 import type { StyleDecl } from '../facets/facets'
 import type { ComponentIR, ComponentNode } from '../structure/types'
 

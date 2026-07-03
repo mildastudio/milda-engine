@@ -1,5 +1,5 @@
-import { archetypesByName, atomsByName } from 'milda'
-import type { AnatomyPart, PartRole } from 'milda'
+import { archetypesByName, atomsByName } from '@mildastudio/milda'
+import type { AnatomyPart, PartRole } from '@mildastudio/milda'
 import type { ComponentContract, EventDef, PropDef, PropType, PropValue } from '../contract/types'
 import { applyArchetypeDefaults } from '../defaults'
 import {

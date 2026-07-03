@@ -19,7 +19,7 @@
     "build": "tsup index.ts --format esm,cjs --dts --clean"
   },
   "dependencies": {
-    "milda": "^0.1.0"
+    "@mildastudio/milda": "^0.1.0"
   },
   "devDependencies": {
     "typescript": "^5"

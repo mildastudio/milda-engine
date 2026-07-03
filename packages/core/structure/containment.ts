@@ -1,5 +1,5 @@
-import { archetypesByName } from 'milda'
-import type { ContentCategory } from 'milda'
+import { archetypesByName } from '@mildastudio/milda'
+import type { ContentCategory } from '@mildastudio/milda'
 import type { ComponentIR, ComponentNode, NodeKind } from './types'
 
 export type { ContentCategory }
