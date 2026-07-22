@@ -77,7 +77,10 @@ function dtcgType(type: TokenType): string {
 function figmaType(type: TokenType): FigmaVarType | null {
   if (type === 'color') return 'COLOR'
   if (type === 'gradient' || type === 'textStyle') return null
-  if (type === 'elevation') return 'STRING'
+  // Both resolve to a raw CSS string (box-shadow / cubic-bezier(...)), never a
+  // number — declaring them FLOAT (the catch-all below) made the plugin's
+  // setValueForMode reject the string value as a resolved-type mismatch.
+  if (type === 'elevation' || type === 'easing') return 'STRING'
   return 'FLOAT'
 }
 

@@ -15,6 +15,7 @@
 // components untouched with a note.
 
 import type {
+  ComponentComposition,
   ComponentIR,
   ComponentNode,
   ComponentStructure,
@@ -22,9 +23,13 @@ import type {
   EventDef as IrEventDef,
   Layer as IrLayer,
   NodeKind,
+  Predicate as IrPredicate,
+  PredicateRef as IrPredicateRef,
   PropDef as IrPropDef,
   PropType,
+  SharedType as IrSharedType,
   Slot as IrSlot,
+  StateName as IrStateName,
   StateRule,
   Token as IrToken,
   TokenType as IrTokenType,
@@ -42,6 +47,8 @@ import type {
   InsetValue,
   LayoutSpec,
   Part,
+  Predicate as AstPredicate,
+  PredicateRef as AstPredicateRef,
   PropDef as AstPropDef,
   Token as AstToken,
   TokenType as AstTokenType,
@@ -283,6 +290,37 @@ function layoutToIr(ls: LayoutSpec, facetsOut: Record<string, string>, issues: s
   return layout
 }
 
+// AST predicate ref → editor-IR predicate ref. Structurally identical; the only skew is
+// the state-name type (the AST keeps it a plain string, the IR narrows to `StateName`).
+function refToIr(ref: AstPredicateRef): IrPredicateRef {
+  switch (ref.kind) {
+    case 'prop':
+      return { kind: 'prop', path: ref.path }
+    case 'state':
+      return { kind: 'state', state: ref.state as IrStateName }
+    case 'context':
+      return { kind: 'context', group: ref.group }
+    case 'ancestor':
+      return { kind: 'ancestor', nodeId: ref.nodeId, state: ref.state as IrStateName }
+  }
+}
+
+// AST predicate (proposal 0032) → editor-IR `Predicate`. Recurses the AND/OR/NOT tree and
+// lowers each comparison leaf; the two shapes match 1:1, so this is a faithful reconstruction
+// of the condition the emitter serialized (`predToDsl`) — the inverse that closes the loop.
+function predicateToIr(p: AstPredicate): IrPredicate {
+  switch (p.kind) {
+    case 'all':
+      return { kind: 'all', items: p.items.map(predicateToIr) }
+    case 'any':
+      return { kind: 'any', items: p.items.map(predicateToIr) }
+    case 'not':
+      return { kind: 'not', item: predicateToIr(p.item) }
+    case 'cmp':
+      return { kind: 'cmp', ref: refToIr(p.ref), op: p.op, ...(p.value !== undefined ? { value: p.value } : {}) }
+  }
+}
+
 let ruleSeq = 0
 function partStateRules(part: Part, issues: string[]): StateRule[] {
   const rules: StateRule[] = []
@@ -301,10 +339,14 @@ function partStateRules(part: Part, issues: string[]): StateRule[] {
   for (const v of part.variants ?? []) {
     const facets = facetMapToIr(v.facets, issues)
     const layout = v.layout ? layoutToIr(v.layout, facets, issues) : undefined
+    // A rich predicate (`when <predicate>`, 0032) is the canonical condition and lands in
+    // `StateRule.when`; the flat single-condition `when prop=value` keeps its legacy home in
+    // `props` (the representable fast path). Only one is ever set on a given variant.
     rules.push({
       id: `sr${ruleSeq++}`,
       props: v.when ? { [v.when.prop]: v.when.eq } : {},
       states: (v.states ?? []) as StateRule['states'],
+      ...(v.whenPredicate ? { when: predicateToIr(v.whenPredicate) } : {}),
       ...(Object.keys(facets).length ? { facets } : {}),
       ...(layout && Object.keys(layout).length ? { layout } : {}),
     })
@@ -351,6 +393,14 @@ function propToIr(p: AstPropDef): IrPropDef {
   if (p.required !== undefined) out.required = p.required
   if (p.description) out.description = p.description
   if (p.binding) out.binding = p.binding
+  // Prop metadata annotations (proposal 0026): AST meta map → typed core PropMeta.
+  if (p.meta) {
+    const pm: NonNullable<IrPropDef['meta']> = {}
+    const st = p.meta.status
+    if (st === 'stable' || st === 'beta' || st === 'experimental' || st === 'deprecated') pm.status = st
+    if (p.meta.since != null) pm.since = String(p.meta.since)
+    if (Object.keys(pm).length) out.meta = pm
+  }
   return out
 }
 
@@ -407,6 +457,7 @@ export function componentToIr(c: AstComponent): ComponentToIrResult {
       ...(Object.keys(facets).length ? { facets } : {}),
       ...(layout && Object.keys(layout).length ? { layout } : {}),
       ...(states.length ? { states } : {}),
+      ...(part.presence ? { presence: predicateToIr(part.presence) } : {}),
     }
     nodes[node.id] = node
   }
@@ -454,28 +505,82 @@ export function componentToIr(c: AstComponent): ComponentToIrResult {
     structure,
     contract: { props: c.contract.props.map(propToIr), events: c.contract.events.map(eventToIr) },
   }
+  if (c.meta && Object.keys(c.meta).length) component.meta = c.meta as ComponentIR['meta']
+
+  // Authored behavior composition (proposal 0024): AST uses/coordination → editor IR.
+  if (c.composition) {
+    const composition: ComponentComposition = { uses: [], wires: [], gates: [] }
+    c.composition.uses.forEach((u, i) =>
+      composition.uses.push({ id: `u${i}`, atom: u.atom, as: u.as, ...(u.params ? { params: u.params } : {}) }),
+    )
+    c.composition.coordination.forEach((e, i) => {
+      if (e.kind === 'wire') {
+        composition.wires.push({ id: `w${i}`, from: e.from, to: e.to, ...(e.arg ? { arg: e.arg } : {}), ...(e.when ? { when: e.when } : {}) })
+      } else if (e.kind === 'gate') {
+        composition.gates.push({ id: `g${i}`, machine: e.machine, activeWhen: e.activeWhen })
+      } else {
+        issues.push(`composition ${e.kind} has no editor form — dropped`)
+      }
+    })
+    if (composition.uses.length || composition.wires.length || composition.gates.length) {
+      component.composition = composition
+    }
+  }
   return { component, issues }
+}
+
+// Document-level metadata recovered from the AST (proposal 0026) — the app applies
+// this to the project record (name/version) since the document IR has no such field.
+export interface DocumentIrMeta {
+  name?: string
+  version?: string
+  description?: string
+  milda?: string
+  prelude?: string
+  metadata: Record<string, unknown>
 }
 
 export interface DocumentToIrResult {
   foundations: DocumentFoundations
+  sharedTypes: IrSharedType[]
   components: ComponentIR[]
+  meta: DocumentIrMeta
   issues: string[]
 }
 
 // A whole parsed AST document → the editor IR pieces the app loads: foundations +
-// components. (Assets, docs, examples, component groups are not expressed in the DSL.)
+// shared types + components + document metadata. (Assets, docs, examples, component
+// groups are not expressed in the DSL.)
 export function documentToIr(doc: {
+  milda?: string
+  prelude?: string
+  meta?: { name?: string; version?: string; description?: string }
   foundations: AstFoundations
   components: AstComponent[]
 }): DocumentToIrResult {
   const f = foundationsToIr(doc.foundations)
   const issues = [...f.issues]
+  const sharedTypes: IrSharedType[] = (doc.foundations.sharedTypes ?? []).map((st) => ({
+    id: st.id,
+    name: st.name,
+    ...(st.description ? { description: st.description } : {}),
+    definition: typeToIr(st.definition),
+  }))
   const components: ComponentIR[] = []
   for (const c of doc.components) {
     const r = componentToIr(c)
     components.push(r.component)
     for (const i of r.issues) issues.push(`${c.name}: ${i}`)
   }
-  return { foundations: f.foundations, components, issues }
+  const metadata: Record<string, unknown> = {}
+  for (const e of doc.foundations.metadata ?? []) metadata[e.key] = e.value
+  const meta: DocumentIrMeta = {
+    ...(doc.meta?.name ? { name: doc.meta.name } : {}),
+    ...(doc.meta?.version ? { version: doc.meta.version } : {}),
+    ...(doc.meta?.description ? { description: doc.meta.description } : {}),
+    ...(doc.milda ? { milda: doc.milda } : {}),
+    ...(doc.prelude ? { prelude: doc.prelude } : {}),
+    metadata,
+  }
+  return { foundations: f.foundations, sharedTypes, components, meta, issues }
 }

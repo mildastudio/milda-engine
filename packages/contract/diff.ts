@@ -1,5 +1,5 @@
 import { propTypeLabel } from '@mildastudio/core'
-import type { ContractDigest, ComponentDigest } from './digest'
+import type { ContractDigest, ComponentDigest, PropDigest, EventDigest, SlotDigest } from './digest'
 import { typesEqual, inputChangeSeverity, outputChangeSeverity } from './variance'
 
 export type Severity = 'major' | 'minor' | 'patch'
@@ -30,86 +30,145 @@ function rollup(changes: Change[]): Severity {
   return sev
 }
 
+// ─── Pairing ──────────────────────────────────────────────────────────────────
+// Members pair by STABLE ID first (digest v2), then by name for legacy digests
+// that carry no ids. Id pairing is what makes a rename ONE change ("prop
+// `opened` renamed to `isOpened`") instead of a remove+add pair.
+
+interface Pairing<T> {
+  matched: Array<{ prevName: string; nextName: string; prev: T; next: T }>
+  removed: Array<{ name: string; d: T }>
+  added: Array<{ name: string; d: T }>
+}
+
+function pairMembers<T extends { id?: string }>(
+  prev: Record<string, T>,
+  next: Record<string, T>,
+): Pairing<T> {
+  const out: Pairing<T> = { matched: [], removed: [], added: [] }
+  const nextByName = new Map(Object.entries(next))
+  const nextById = new Map<string, string>()
+  for (const [name, d] of nextByName) if (d.id) nextById.set(d.id, name)
+
+  const claimedNext = new Set<string>()
+  const unmatchedPrev: Array<[string, T]> = []
+
+  for (const [name, d] of Object.entries(prev)) {
+    const byId = d.id ? nextById.get(d.id) : undefined
+    if (byId !== undefined && !claimedNext.has(byId)) {
+      out.matched.push({ prevName: name, nextName: byId, prev: d, next: next[byId] })
+      claimedNext.add(byId)
+    } else {
+      unmatchedPrev.push([name, d])
+    }
+  }
+  // Name fallback for legacy members without ids (or ids that vanished).
+  for (const [name, d] of unmatchedPrev) {
+    const candidate = nextByName.get(name)
+    if (candidate && !claimedNext.has(name)) {
+      out.matched.push({ prevName: name, nextName: name, prev: d, next: candidate })
+      claimedNext.add(name)
+    } else {
+      out.removed.push({ name, d })
+    }
+  }
+  for (const [name, d] of nextByName) {
+    if (!claimedNext.has(name)) out.added.push({ name, d })
+  }
+  return out
+}
+
+// Join sentence fragments as "a", "a and b", or "a, b and c".
+function joinClauses(parts: string[]): string {
+  if (parts.length <= 1) return parts[0] ?? ''
+  return `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}`
+}
+
+// ─── Component member diffs ───────────────────────────────────────────────────
+
 function diffComponent(name: string, prev: ComponentDigest, next: ComponentDigest): Change[] {
   const changes: Change[] = []
   const add = (severity: 'major' | 'minor', kind: ChangeKind, member: string, summary: string) =>
     changes.push({ severity, kind, component: name, member, summary })
 
-  const prevProps = new Set(Object.keys(prev.props))
-  const nextProps = new Set(Object.keys(next.props))
-  for (const p of nextProps) {
-    if (!prevProps.has(p)) {
-      const required = next.props[p].required
-
-      add(
-        required ? 'major' : 'minor',
-        'prop',
-        p,
-        `${name}: added ${required ? 'required' : 'optional'} prop \`${p}\``,
-      )
-    }
+  // Props — every aspect of one prop merges into a single human sentence.
+  const props = pairMembers(prev.props, next.props)
+  for (const { name: p, d } of props.added) {
+    add(
+      d.required ? 'major' : 'minor',
+      'prop',
+      p,
+      `Added ${d.required ? 'required' : 'optional'} prop \`${p}\` to \`${name}\``,
+    )
   }
-  for (const p of prevProps) {
-    if (!nextProps.has(p)) {
-      add('major', 'prop', p, `${name}: removed prop \`${p}\``)
-      continue
-    }
-    const a = prev.props[p]
-    const b = next.props[p]
-    if (a.required !== b.required) {
-      add(
-        b.required ? 'major' : 'minor',
-        'prop',
-        p,
-        `${name}: prop \`${p}\` became ${b.required ? 'required' : 'optional'}`,
-      )
+  for (const { name: p } of props.removed) {
+    add('major', 'prop', p, `Removed prop \`${p}\` from \`${name}\``)
+  }
+  for (const { prevName, nextName, prev: a, next: b } of props.matched) {
+    const clauses: string[] = []
+    let sev: 'major' | 'minor' | null = null
+    const raise = (s: 'major' | 'minor') => {
+      sev = sev === 'major' || s === 'major' ? 'major' : 'minor'
     }
     if (!typesEqual(a.type, b.type)) {
-      const sev = inputChangeSeverity(a.type, b.type)
-      add(
-        sev,
-        'prop',
-        p,
-        `${name}: prop \`${p}\` type ${propTypeLabel(a.type)} → ${propTypeLabel(b.type)}`,
+      clauses.push(`changed from type \`${propTypeLabel(a.type)}\` to type \`${propTypeLabel(b.type)}\``)
+      raise(inputChangeSeverity(a.type, b.type))
+    }
+    if (a.required !== b.required) {
+      clauses.push(`became ${b.required ? 'required' : 'optional'}`)
+      raise(b.required ? 'major' : 'minor')
+    }
+    if (prevName !== nextName) {
+      clauses.push(`was renamed to \`${nextName}\``)
+      raise('major')
+    }
+    if (clauses.length > 0 && sev) {
+      add(sev, 'prop', prevName, `Prop \`${prevName}\` on \`${name}\` ${joinClauses(clauses)}`)
+    }
+  }
+
+  // Events.
+  const events = pairMembers(prev.events, next.events)
+  for (const { name: e } of events.added) add('minor', 'event', e, `Added event \`${e}\` to \`${name}\``)
+  for (const { name: e } of events.removed) add('major', 'event', e, `Removed event \`${e}\` from \`${name}\``)
+  for (const { prevName, nextName, prev: a, next: b } of events.matched) {
+    const clauses: string[] = []
+    let sev: 'major' | 'minor' | null = null
+    const raise = (s: 'major' | 'minor') => {
+      sev = sev === 'major' || s === 'major' ? 'major' : 'minor'
+    }
+    const payloadChanged = a.payload || b.payload ? !a.payload || !b.payload || !typesEqual(a.payload, b.payload) : false
+    if (payloadChanged) {
+      clauses.push(
+        a.payload && b.payload
+          ? `changed payload from \`${propTypeLabel(a.payload)}\` to \`${propTypeLabel(b.payload)}\``
+          : b.payload
+            ? `gained a \`${propTypeLabel(b.payload)}\` payload`
+            : 'lost its payload',
       )
+      raise(a.payload && b.payload ? outputChangeSeverity(a.payload, b.payload) : 'major')
+    }
+    if (prevName !== nextName) {
+      clauses.push(`was renamed to \`${nextName}\``)
+      raise('major')
+    }
+    if (clauses.length > 0 && sev) {
+      add(sev, 'event', prevName, `Event \`${prevName}\` on \`${name}\` ${joinClauses(clauses)}`)
     }
   }
 
-  const prevEvents = new Set(Object.keys(prev.events))
-  const nextEvents = new Set(Object.keys(next.events))
-  for (const e of nextEvents) {
-    if (!prevEvents.has(e)) add('minor', 'event', e, `${name}: added event \`${e}\``)
-  }
-  for (const e of prevEvents) {
-    if (!nextEvents.has(e)) {
-      add('major', 'event', e, `${name}: removed event \`${e}\``)
-      continue
+  // Slots.
+  const slots = pairMembers(prev.slots, next.slots)
+  for (const { name: s } of slots.added) add('minor', 'slot', s, `Added slot \`${s}\` to \`${name}\``)
+  for (const { name: s } of slots.removed) add('major', 'slot', s, `Removed slot \`${s}\` from \`${name}\``)
+  for (const { prevName, nextName, prev: a, next: b } of slots.matched) {
+    const clauses: string[] = []
+    if (a.arity !== b.arity) clauses.push(`changed arity from ${a.arity} to ${b.arity}`)
+    if (a.accepts !== b.accepts) clauses.push(`changed accepted content from ${a.accepts} to ${b.accepts}`)
+    if (prevName !== nextName) clauses.push(`was renamed to \`${nextName}\``)
+    if (clauses.length > 0) {
+      add('major', 'slot', prevName, `Slot \`${prevName}\` on \`${name}\` ${joinClauses(clauses)}`)
     }
-    const a = prev.events[e].payload
-    const b = next.events[e].payload
-    if (!a && !b) continue
-    if (!a || !b || !typesEqual(a, b)) {
-      const sev = a && b ? outputChangeSeverity(a, b) : 'major'
-      add(sev, 'event', e, `${name}: event \`${e}\` payload changed`)
-    }
-  }
-
-  const prevSlots = new Set(Object.keys(prev.slots))
-  const nextSlots = new Set(Object.keys(next.slots))
-  for (const s of nextSlots) {
-    if (!prevSlots.has(s)) add('minor', 'slot', s, `${name}: added slot \`${s}\``)
-  }
-  for (const s of prevSlots) {
-    if (!nextSlots.has(s)) {
-      add('major', 'slot', s, `${name}: removed slot \`${s}\``)
-      continue
-    }
-    const a = prev.slots[s]
-    const b = next.slots[s]
-    if (a.arity !== b.arity)
-      add('major', 'slot', s, `${name}: slot \`${s}\` arity ${a.arity} → ${b.arity}`)
-    if (a.accepts !== b.accepts)
-      add('major', 'slot', s, `${name}: slot \`${s}\` accepts ${a.accepts} → ${b.accepts}`)
   }
 
   return changes
@@ -117,30 +176,36 @@ function diffComponent(name: string, prev: ComponentDigest, next: ComponentDiges
 
 export function diffDigests(prev: ContractDigest, next: ContractDigest): DiffResult {
   const changes: Change[] = []
-  const prevNames = new Set(Object.keys(prev.components))
-  const nextNames = new Set(Object.keys(next.components))
+  const components = pairMembers(prev.components, next.components)
 
-  for (const name of nextNames) {
-    if (!prevNames.has(name)) {
-      changes.push({
-        severity: 'minor',
-        kind: 'component',
-        component: name,
-        summary: `Added component \`${name}\``,
-      })
-    }
+  for (const { name } of components.added) {
+    changes.push({
+      severity: 'minor',
+      kind: 'component',
+      component: name,
+      summary: `Added component \`${name}\``,
+    })
   }
-  for (const name of prevNames) {
-    if (!nextNames.has(name)) {
+  for (const { name } of components.removed) {
+    changes.push({
+      severity: 'major',
+      kind: 'component',
+      component: name,
+      summary: `Removed component \`${name}\``,
+    })
+  }
+  for (const { prevName, nextName, prev: a, next: b } of components.matched) {
+    if (prevName !== nextName) {
+      // A renamed component changes every consumer's import — major, but ONE
+      // coherent change instead of remove+add.
       changes.push({
         severity: 'major',
         kind: 'component',
-        component: name,
-        summary: `Removed component \`${name}\``,
+        component: prevName,
+        summary: `Renamed component \`${prevName}\` to \`${nextName}\``,
       })
-      continue
     }
-    changes.push(...diffComponent(name, prev.components[name], next.components[name]))
+    changes.push(...diffComponent(nextName, a, b))
   }
 
   return { severity: rollup(changes), changes }

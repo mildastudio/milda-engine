@@ -5,6 +5,7 @@ import type { NamingConvention } from './naming'
 import { canonicalLength, isLengthType } from './dimensions'
 import { SYSTEM_STACKS, type FontFamily } from './typography'
 import { ICON_SETS, type IconLibrary } from './icons'
+import type { MessageCatalog } from './messages'
 
 export type TokenType = 'color' | ScaleName | 'gradient' | 'textStyle' | 'easing'
 
@@ -121,6 +122,9 @@ export interface DocumentFoundations {
   naming?: NamingConvention
   fonts?: FontFamily[]
   icons?: IconLibrary
+  // Category-B translatable strings (proposal 0030). Additive/optional: absent on
+  // every existing document, which generates exactly as before (single baked locale).
+  messages?: MessageCatalog
 }
 
 const raw = (value: string): TokenValue => ({ kind: 'fixed', slot: { raw: value } })
@@ -144,40 +148,6 @@ function easingSeedTokens(): Omit<Token, 'group' | 'order'>[] {
     value: easingVal(e.curve),
   }))
 }
-function durationSeedTokens(): Omit<Token, 'group' | 'order'>[] {
-  return SCALES.duration.map((t) => ({
-    id: t.id,
-    name: t.name,
-    type: 'duration' as const,
-    value: raw(t.value),
-  }))
-}
-
-function backfillMotionTokens(f: DocumentFoundations): DocumentFoundations {
-  const has = (type: TokenType) => f.layers.some((l) => l.tokens.some((t) => t.type === type))
-  const seed: Omit<Token, 'group' | 'order'>[] = [
-    ...(has('duration') ? [] : durationSeedTokens()),
-    ...(has('easing') ? [] : easingSeedTokens()),
-  ]
-  if (seed.length === 0 || f.layers.length === 0) return f
-
-  const sorted = [...f.layers].sort((a, b) => a.order - b.order)
-  const isScale = (t: Token) => !isCompositeType(t.type) && t.type !== 'color'
-  const target =
-    sorted.find((l) => l.tokens.some(isScale)) ??
-    sorted.find((l) => l.id === 'semantic') ??
-    sorted[sorted.length - 1]
-
-  const startOrder = target.tokens.reduce((m, t) => Math.max(m, t.order ?? 0), -1) + 1
-  const added: Token[] = seed.map((t, i) => ({ ...t, group: null, order: startOrder + i }))
-  return {
-    ...f,
-    layers: f.layers.map((l) =>
-      l.id === target.id ? { ...l, tokens: [...l.tokens, ...added] } : l,
-    ),
-  }
-}
-
 function buildBaseColors(): { tokens: Token[]; groups: TokenGroup[] } {
   const perParent: Record<string, number> = {}
   const groups: TokenGroup[] = COLOR_GROUPS.map((g) => {
@@ -400,13 +370,15 @@ export function migrateFoundations(f: unknown): DocumentFoundations {
   }
 
   if (any && Array.isArray(any.layers)) {
-    return backfillMotionTokens({
+    return {
       contextGroups: Array.isArray(any.contextGroups) ? any.contextGroups : [],
       layers: any.layers.map(normalizeLayer),
       naming: any.naming,
       fonts: Array.isArray(any.fonts) ? any.fonts : [],
       icons: any.icons && Array.isArray(any.icons.sets) ? any.icons : { sets: [], icons: [] },
-    })
+      messages:
+        any.messages && Array.isArray(any.messages.messages) ? any.messages : undefined,
+    }
   }
 
   if (!any || (!any.colors && !any.scales)) return defaultFoundations()

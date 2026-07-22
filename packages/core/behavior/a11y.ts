@@ -6,6 +6,10 @@ export function isNameableControl(node: ComponentNode): boolean {
 
 export function hasAccessibleName(node: ComponentNode): boolean {
   if (node.a11y?.name || node.a11y?.labelledBy) return true
+  // A default-slot control (a bare Tooltip/Popover trigger) defers its name to
+  // whatever the consumer eventually wraps it around — it isn't nameless, the
+  // name just isn't known yet at the archetype level.
+  if (node.slot?.default) return true
   return Boolean(node.content)
 }
 
@@ -14,7 +18,11 @@ export function controlMissingName(node: ComponentNode): boolean {
 }
 
 function hasTextLabel(node: ComponentNode): boolean {
-  return node.kind === 'text'
+  // A text node names a control only if it actually carries content — an EMPTY label node (no
+  // content: an icon-only button whose label was never given text) provides no accessible name,
+  // so it must not silence the name-risk warning. Mirrors the node-level `hasAccessibleName`'s
+  // `Boolean(node.content)`; a bound/static label counts, a content-less one doesn't.
+  return node.kind === 'text' && Boolean(node.content)
 }
 
 function subtreeHasTextLabel(node: ComponentNode, nodes: Record<string, ComponentNode>): boolean {
@@ -38,6 +46,7 @@ export function hasAccessibleNameInTree(
   nodes: Record<string, ComponentNode>,
 ): boolean {
   if (node.a11y?.name || node.a11y?.labelledBy) return true
+  if (node.slot?.default) return true
   return subtreeHasTextLabel(node, nodes)
 }
 

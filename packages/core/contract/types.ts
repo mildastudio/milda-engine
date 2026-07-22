@@ -25,15 +25,31 @@ export interface PropField {
 
 export type PropValue = string | number | boolean | PropValue[] | { [k: string]: PropValue }
 
+// Descriptive prop metadata (proposal 0026) — status (incl. deprecated), plus the
+// auto-stamped `since` (release version it first shipped). Never contractual;
+// excluded from the contract digest. Authored via a select; `since` is stamped
+// automatically.
+export interface PropMeta {
+  status?: 'stable' | 'beta' | 'experimental' | 'deprecated'
+  since?: string
+}
+
 export interface PropDef {
   id: string
   name: string
   type: PropType
   default?: PropValue
+  // A design-time SAMPLE value, distinct from the runtime `default`: the value the editor
+  // canvas and thumbnails resolve bindings against, so a bound node reads like a finished
+  // component even when the prop has no default (or you don't want a runtime one). Never
+  // emitted by the generator — purely an authoring aid, like slot/media samples.
+  sample?: PropValue
   required?: boolean
   description?: string
 
   binding?: string
+
+  meta?: PropMeta
 }
 
 export type EventOrigin = 'archetype' | 'author'

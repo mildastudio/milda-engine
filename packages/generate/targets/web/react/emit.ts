@@ -8,12 +8,15 @@ import {
   facetCssVar,
   facetDecls,
   iconifySvgUrl,
+  isRawValue,
   layoutVarDecls,
   motionDecls,
   normalizeNodeContent,
   resolveIcon,
+  resolveMediaSource,
   planBehavior,
   planCompound,
+  normalizeContentValue,
   surfacePositionDecls,
   type ComponentIR,
   type ComponentNode,
@@ -21,7 +24,12 @@ import {
   type DisclosurePlan,
   type EventDef,
   type IconLibrary,
+  coercePredicate,
+  ruleNeedsDataCond,
+  dataCondAttr,
   type PropCondition,
+  type Predicate,
+  type PredicateRef,
   type PropType,
   type SharedType,
   type SlotSurface,
@@ -62,8 +70,9 @@ import {
   type PropDef,
   type PropValue,
   type RepeatSource,
+  type StateName,
 } from '@mildastudio/core'
-import { StyleSheet } from '../css/sheet'
+import { StyleSheet } from '../../css/sheet'
 
 export interface ReactSurface {
   className: boolean
@@ -105,7 +114,30 @@ export interface EmitOptions {
 
   icons?: IconLibrary
   assets?: Record<string, { url?: string }>
+
+  // DatePicker date-value representation (proposal 0029 §4.1), a project/publish-level
+  // choice covering the ecosystem union. Defaults: isoDate + object range.
+  dateRepresentation?: 'isoDate' | 'nativeDate' | 'epochMs' | 'ymd'
+  dateRangeShape?: 'object' | 'tuple'
+
+  // TimePicker time-value representation. Default isoTime ('HH:mm').
+  timeRepresentation?: 'isoTime' | 'minutes' | 'hm'
+
+  // ColorPicker color-value representation. Default hex ('#rrggbb').
+  colorRepresentation?: 'hex' | 'rgb' | 'hsl'
+
+  // How the shared behavior core (calendar/time) reaches a generated component
+  // (proposal 0029 §8.3). 'vendored' (default) copies the core beside the component;
+  // 'package' imports it from a shared published package (deduped across a whole DS
+  // and, critically, across microfrontends). behaviorPackage is the specifier used
+  // in 'package' mode (defaults to BEHAVIOR_PACKAGE_DEFAULT).
+  behaviorDelivery?: 'vendored' | 'package'
+  behaviorPackage?: string
 }
+
+// Default specifier for the shared behavior package in 'package' delivery mode. The
+// release layer may override it (e.g. `${scope}/behavior`) via EmitOptions.behaviorPackage.
+export const BEHAVIOR_PACKAGE_DEFAULT = '@mildastudio/ds-behavior'
 
 const ROOT_ELEMENT: Record<string, string> = {
   Button: 'button',
@@ -360,7 +392,8 @@ function repeatItemsExpr(source: RepeatSource): string {
 }
 
 function contentValueExpr(value: ContentValue): string {
-  return value.kind === 'text' ? JSON.stringify(value.text) : bindingExpr(value.propName)
+  const v = normalizeContentValue(value)
+  return v.kind === 'value' ? JSON.stringify(v.value) : bindingExpr(v.propName)
 }
 
 function whenExpr(when: PropCondition): string {
@@ -368,16 +401,132 @@ function whenExpr(when: PropCondition): string {
   return parts.length ? parts.join(' && ') : 'true'
 }
 
-function contentExpr(node: ComponentNode): string | null {
-  if (node.slot?.default) return 'children'
-  const c = normalizeNodeContent(node.content)
-  if (!c) return null
-  if (c.kind === 'static') return JSON.stringify(c.text)
-  let expr = contentValueExpr(c.default)
-  for (let i = c.rules.length - 1; i >= 0; i--) {
-    expr = `${whenExpr(c.rules[i].when)} ? ${contentValueExpr(c.rules[i].value)} : ${expr}`
+// Native states whose truth maps to a forwarded prop by convention (mirrors the
+// editor's NATIVE_PROP_STATE). Other data-bound states resolve via `stateBindings`.
+const NATIVE_PRESENCE_STATE_PROP: Record<string, string> = {
+  disabled: 'disabled',
+  readonly: 'readOnly',
+  checked: 'checked',
+}
+
+// The prop-backed boolean a presence `state` reads (0031). A stateBinding wins (the
+// authored prop→state wiring); otherwise the native-prop convention. Returns undefined
+// for states with no runtime boolean (auto/interaction) — the editor never offers those
+// for presence, so this only fires on prop-driven states.
+function presenceStateExpr(node: ComponentNode, state: string): string | undefined {
+  const binding = (node.stateBindings ?? []).find((b) => b.state === state)
+  if (binding) return bindingExpr(binding.propName)
+  const native = NATIVE_PRESENCE_STATE_PROP[state]
+  return native ? bindingExpr(native) : undefined
+}
+
+const PREDICATE_CMP_JS: Record<string, string> = {
+  eq: '===',
+  ne: '!==',
+  lt: '<',
+  lte: '<=',
+  gt: '>',
+  gte: '>=',
+}
+
+// The JS boolean a predicate leaf's referenced value reads, or null when it has no static
+// runtime representation in generated React (context — pending 0032 phase 4 — and
+// non-prop-reachable states). Prop leaves use `bindingExpr` (repeat-item-alias aware).
+function predicateRefExpr(ref: PredicateRef, node: ComponentNode): string | null {
+  if (ref.kind === 'prop') return bindingExpr(ref.path)
+  if (ref.kind === 'state') return presenceStateExpr(node, ref.state) ?? null
+  // Foundations context (0032 phase 4): read the active context id from the MildaContext
+  // hook. `_mildaCtx` is declared once in the component body when usesMildaContext is set.
+  if (ref.kind === 'context') {
+    usesMildaContext = true
+    return `_mildaCtx[${JSON.stringify(ref.group)}]`
   }
-  return expr
+  // ancestor — CSS-only, no runtime JS boolean.
+  return null
+}
+
+// Recursively translate a predicate (0032) to a JS boolean expression, or null when any
+// part can't be expressed (fail-open: the caller then renders unconditionally rather than
+// wrongly hiding). Groups parenthesize their members so precedence is explicit.
+function predicateExpr(p: Predicate, node: ComponentNode): string | null {
+  switch (p.kind) {
+    case 'cmp': {
+      const left = predicateRefExpr(p.ref, node)
+      if (left === null) return null
+      if (p.op === 'set') return left
+      if (p.op === 'unset') return `!(${left})`
+      if (p.op === 'contains') return `(${left})?.includes(${JSON.stringify(p.value)})`
+      return `${left} ${PREDICATE_CMP_JS[p.op]} ${JSON.stringify(p.value)}`
+    }
+    case 'not': {
+      const e = predicateExpr(p.item, node)
+      return e === null ? null : `!(${e})`
+    }
+    case 'all':
+    case 'any': {
+      if (p.items.length === 0) return p.kind === 'all' ? 'true' : 'false'
+      const parts = p.items.map((i) => predicateExpr(i, node))
+      if (parts.some((x) => x === null)) return null
+      return parts.map((x) => `(${x})`).join(p.kind === 'all' ? ' && ' : ' || ')
+    }
+  }
+}
+
+// The JS boolean guarding a node's conditional presence, or null when unconditional
+// (absent predicate, an always-true predicate, or one that can't be expressed).
+function presenceExpr(node: ComponentNode): string | null {
+  if (!node.presence) return null
+  const expr = predicateExpr(node.presence, node)
+  return expr === null || expr === 'true' ? null : expr
+}
+
+// data-cond attributes (0032 §4.2) for a node's rich `when` styling rules that the CSS
+// target keyed off `[data-cond-<id>]`. Each is set from the rule's predicate boolean, so a
+// styling condition with OR/NOT/operators restyles at runtime. Rules whose predicate can't
+// be expressed in JS (ancestor/context leaves) are skipped — those stay CSS-selector-only.
+function condAttrs(node: ComponentNode): string {
+  return (node.states ?? [])
+    .filter(ruleNeedsDataCond)
+    .map((r) => {
+      const expr = r.when ? predicateExpr(r.when, node) : null
+      return expr === null ? '' : ` ${dataCondAttr(r)}={${expr} ? '' : undefined}`
+    })
+    .join('')
+}
+
+// Wrap a rendered element in its presence guard, if any. `pad` is the element's own
+// indentation. In JSX-children position (a sibling among other elements) the guard is a
+// JSX expression container `{cond && ( … )}`; inside a `.map(…)` arrow return or array
+// literal it must be a bare JS expression `cond && ( … )` (no braces), so callers there
+// pass `braces: false`.
+function wrapPresence(node: ComponentNode, el: string, pad: string, braces = true): string {
+  const cond = presenceExpr(node)
+  if (!cond) return el
+  const guard = `(${cond}) && (\n${el}\n${pad})`
+  return braces ? `${pad}{${guard}}` : `${pad}${guard}`
+}
+
+function contentExpr(node: ComponentNode): string | null {
+  // Authored content (a literal or a bound prop) always wins over the default-slot
+  // fallback: `slot.default` only means "accept {children} when nothing else is
+  // authored" — an author who binds real content has moved off the slot, and the
+  // generated component must honor THAT, not silently drop it for `{children}`.
+  const c = normalizeNodeContent(node.content)
+  if (c) {
+    if (c.kind === 'static') return JSON.stringify(c.text)
+    let expr = contentValueExpr(c.default)
+    for (let i = c.rules.length - 1; i >= 0; i--) {
+      // A rule's predicate (0032) becomes the ternary test. An inexpressible predicate
+      // (context/unreachable leaf, pending later phases) skips the rule rather than
+      // emitting broken code — the fallthrough (`expr`) covers it.
+      const cond = predicateExpr(coercePredicate(c.rules[i].when) ?? { kind: 'all', items: [] }, node)
+      if (cond === null) continue
+      expr = `${cond} ? ${contentValueExpr(c.rules[i].value)} : ${expr}`
+    }
+    return expr
+  }
+  if (node.slot?.default) return 'children'
+  return null
 }
 
 function textContent(node: ComponentNode): string {
@@ -455,7 +604,10 @@ let activeSheet = new StyleSheet()
 function staticIconName(node: ComponentNode): string | undefined {
   const c = node.content
   if (c?.kind === 'static') return c.text || undefined
-  if (c?.kind === 'dynamic' && c.default.kind === 'text') return c.default.text || undefined
+  if (c?.kind === 'dynamic') {
+    const v = normalizeContentValue(c.default)
+    if (v.kind === 'value') return v.value == null ? undefined : String(v.value) || undefined
+  }
   return undefined
 }
 
@@ -463,8 +615,16 @@ let usesIconComponent = false
 
 let usesIconNameType = false
 
+// Set when a component's predicate (presence/content/styling) gates on a foundations
+// context (0032 phase 4) — the component then imports + calls the MildaContext hook.
+let usesMildaContext = false
+
 function hasIconModule(): boolean {
   return (activeIconLib?.icons.length ?? 0) > 0
+}
+
+function mildaContextImport(): string[] {
+  return usesMildaContext ? [`import { useMildaContext } from './MildaContext'`] : []
 }
 
 let activeProps = new Map<string, PropDef>()
@@ -504,12 +664,15 @@ interface A11yPlan {
 
   labelFor: Map<string, string>
 
+  describedId: Map<string, string>
+
   needsUseId: boolean
 }
 let activeA11y: A11yPlan = {
   labelId: new Map(),
   controlId: new Map(),
   labelFor: new Map(),
+  describedId: new Map(),
   needsUseId: false,
 }
 
@@ -518,6 +681,7 @@ function planA11y(component: ComponentIR): A11yPlan {
   const labelId = new Map<string, string>()
   const controlId = new Map<string, string>()
   const labelFor = new Map<string, string>()
+  const describedId = new Map<string, string>()
   let i = 0
   for (const n of Object.values(nodes)) {
     const target = n.a11y?.labelledBy
@@ -532,7 +696,18 @@ function planA11y(component: ComponentIR): A11yPlan {
       labelId.set(target, '`${_aid}-l' + i++ + '`')
     }
   }
-  return { labelId, controlId, labelFor, needsUseId: labelId.size > 0 || controlId.size > 0 }
+  for (const n of Object.values(nodes)) {
+    const target = n.a11y?.describedBy
+    if (!target || !nodes[target] || describedId.has(target)) continue
+    describedId.set(target, '`${_aid}-d' + i++ + '`')
+  }
+  return {
+    labelId,
+    controlId,
+    labelFor,
+    describedId,
+    needsUseId: labelId.size > 0 || controlId.size > 0 || describedId.size > 0,
+  }
 }
 
 function a11yAttrs(node: ComponentNode): string {
@@ -545,6 +720,9 @@ function a11yAttrs(node: ComponentNode): string {
   else if (a.labelledBy && activeA11y.labelId.has(a.labelledBy)) {
     out += ` aria-labelledby={${activeA11y.labelId.get(a.labelledBy)}}`
   }
+  if (a.describedBy && activeA11y.describedId.has(a.describedBy)) {
+    out += ` aria-describedby={${activeA11y.describedId.get(a.describedBy)}}`
+  }
   return out
 }
 
@@ -552,7 +730,7 @@ function a11yLabelAttrs(node: ComponentNode): string {
   let out = ''
   const forExpr = activeA11y.labelFor.get(node.id)
   if (forExpr) out += ` htmlFor={${forExpr}}`
-  const idExpr = activeA11y.labelId.get(node.id)
+  const idExpr = activeA11y.labelId.get(node.id) ?? activeA11y.describedId.get(node.id)
   if (idExpr) out += ` id={${idExpr}}`
   return out
 }
@@ -586,6 +764,52 @@ function iconDeliveryUrl(icon: Icon, assets: Record<string, { url?: string }>): 
   if (icon.kind === 'custom') return assets[icon.assetId]?.url
   if (icon.svg) return `data:image/svg+xml,${encodeURIComponent(icon.svg)}`
   return iconifySvgUrl(icon.prefix, icon.name)
+}
+
+// The MildaContext shared module (0032 phase 4): a React context provider + hook holding
+// the active foundations context selection (groupId → contextId). Components that gate on a
+// context read it here. Emitted once per package (like Icon.tsx) when any component uses it;
+// callers can skip it when no component gates on context.
+export function toMildaContextModule(): string {
+  return [
+    `'use client'`,
+    `import { createContext, useContext, type ReactNode } from 'react'`,
+    ``,
+    `// Active foundations context (0032): groupId -> contextId, e.g. { ColorScheme: 'dark' }.`,
+    `// Mirror the data-* attributes that drive themed CSS so JS-gated components read the same`,
+    `// selection. Set it once near your app root via <MildaProvider value={...}>.`,
+    `export type MildaContexts = Record<string, string>`,
+    ``,
+    `const MildaContextValue = createContext<MildaContexts>({})`,
+    ``,
+    `export function MildaProvider({ value, children }: { value: MildaContexts; children: ReactNode }) {`,
+    `  return <MildaContextValue.Provider value={value}>{children}</MildaContextValue.Provider>`,
+    `}`,
+    ``,
+    `export function useMildaContext(): MildaContexts {`,
+    `  return useContext(MildaContextValue)`,
+    `}`,
+    ``,
+  ].join('\n')
+}
+
+function predHasContextLeaf(p: Predicate | undefined): boolean {
+  if (!p) return false
+  if (p.kind === 'cmp') return p.ref.kind === 'context'
+  if (p.kind === 'not') return predHasContextLeaf(p.item)
+  return p.items.some(predHasContextLeaf)
+}
+
+// Whether any of a component's predicates (presence / styling / content) gate on a
+// foundations context — i.e. whether the package needs the MildaContext module.
+export function componentUsesContext(ir: ComponentIR): boolean {
+  for (const node of Object.values(ir.structure.nodes)) {
+    if (predHasContextLeaf(node.presence)) return true
+    for (const r of node.states ?? []) if (predHasContextLeaf(r.when)) return true
+    const c = node.content
+    if (c && c.kind === 'dynamic') for (const r of c.rules) if (predHasContextLeaf(coercePredicate(r.when))) return true
+  }
+  return false
 }
 
 export function toIconModule(
@@ -686,10 +910,24 @@ const ICON_BOX_DECLS: StyleDecl[] = [
   { prop: 'flex', value: 'none' },
 ]
 
-function iconMaskPaintDecls(url: string): StyleDecl[] {
+// The icon's color facet is `fill` (KIND_FACETS.icon). For a masked glyph the fill IS
+// the mask paint (the solid color clipped to the glyph alpha), not a rectangle behind
+// it — so resolve it here and drop the plain `background` the fill facet would emit.
+// No fill set → inherit the surrounding text color, matching the editor preview.
+function iconPaintColor(facets: Record<string, string> | undefined): string {
+  const fill = facets?.fill
+  if (!fill) return 'currentColor'
+  return isRawValue(fill) ? fill : facetCssVar('color', fill) ?? 'currentColor'
+}
+
+function dropBackground(decls: StyleDecl[]): StyleDecl[] {
+  return decls.filter((d) => d.prop !== 'background')
+}
+
+function iconMaskPaintDecls(url: string, paint = 'currentColor'): StyleDecl[] {
   const u = `url("${url}")`
   return [
-    { prop: 'backgroundColor', value: 'currentColor' },
+    { prop: 'backgroundColor', value: paint },
     { prop: 'WebkitMaskImage', value: u },
     { prop: 'maskImage', value: u },
     { prop: 'WebkitMaskRepeat', value: 'no-repeat' },
@@ -740,8 +978,8 @@ function emitIcon(
         const cond = activeSelectionCond
         const styleA = styleAttrsFor(node, [
           ...ICON_BOX_DECLS,
-          ...nodeStyleDecls(node, 'span'),
-          ...iconMaskPaintDecls(url),
+          ...dropBackground(nodeStyleDecls(node, 'span')),
+          ...iconMaskPaintDecls(url, iconPaintColor(node.facets)),
         ])
         const mask = `${cond} ? 'url("${selUrl}")' : undefined`
         const ink = glyphRule!.facets?.ink
@@ -751,8 +989,8 @@ function emitIcon(
       }
       const styleA = styleAttrsFor(node, [
         ...ICON_BOX_DECLS,
-        ...nodeStyleDecls(node, 'span'),
-        ...iconMaskPaintDecls(url),
+        ...dropBackground(nodeStyleDecls(node, 'span')),
+        ...iconMaskPaintDecls(url, iconPaintColor(node.facets)),
       ])
       return `${pad}<span${key}${styleA}${handlerAttr} aria-hidden />`
     }
@@ -782,8 +1020,8 @@ function iconSpan(node: ComponentNode): string {
     if (url) {
       const styleA = styleAttrsFor(node, [
         ...ICON_BOX_DECLS,
-        ...nodeStyleDecls(node, 'span'),
-        ...iconMaskPaintDecls(url),
+        ...dropBackground(nodeStyleDecls(node, 'span')),
+        ...iconMaskPaintDecls(url, iconPaintColor(node.facets)),
       ])
       return `<span${styleA} aria-hidden />`
     }
@@ -848,9 +1086,11 @@ function emitCheckboxParts(
   const glyphTiming = controlTiming(CHECKBOX_GLYPH_TRANSITION)
   const glyphDecls = [
     ...CHECKBOX_GLYPH_DECLS,
-    ...(glyph ? [...layoutVarDecls(glyph.layout), ...facetDecls(glyph.facets, facetCssVar)] : []),
+    ...(glyph
+      ? dropBackground([...layoutVarDecls(glyph.layout), ...facetDecls(glyph.facets, facetCssVar)])
+      : []),
     ...glyphTiming,
-    ...iconMaskPaintDecls(glyphMaskUrl),
+    ...iconMaskPaintDecls(glyphMaskUrl, iconPaintColor(glyph?.facets)),
   ]
   const cls = activeSheet.checkbox(root, {
     rootDecls: CHECKBOX_ROOT_DECLS,
@@ -1017,14 +1257,24 @@ function planOverlays(component: ComponentIR): OverlayPlan {
   }
 
   const plan = planBehavior(component)
-  if (plan?.kind === 'disclosure' && plan.surfaceId && !surfaces.has(plan.surfaceId)) {
+  // Fold in only the trigger-owned popup plans this path has always emitted —
+  // inline disclosures, standalone menus, and context-opened surfaces keep their
+  // static generic emission until they get a vertical realization here.
+  if (
+    plan?.kind === 'disclosure' &&
+    plan.surfaceId &&
+    !surfaces.has(plan.surfaceId) &&
+    plan.surfaceKind !== 'inline' &&
+    !plan.standalone &&
+    plan.openOn !== 'context'
+  ) {
     const idx = i++
     const info: OverlayInfo = {
       surfaceId: plan.surfaceId,
       state: `open${idx}`,
       setter: `setOpen${idx}`,
       anchorId: plan.triggerId ?? null,
-      kind: plan.surfaceKind,
+      kind: plan.surfaceKind as OverlayInfo['kind'],
       modal: plan.surfaceKind === 'dialog' || plan.surfaceKind === 'sheet',
       dismissable: plan.dismissable ?? true,
     }
@@ -1292,7 +1542,10 @@ function emitChild(
   depth: number,
   overlays?: OverlayPlan,
 ): string | null {
-  if (!node.repeat) return emitElement(node, component, depth, '', overlays)
+  if (!node.repeat) {
+    const el = emitElement(node, component, depth, '', overlays)
+    return el === null ? null : wrapPresence(node, el, '  '.repeat(depth))
+  }
 
   const pad = '  '.repeat(depth)
   const alias = node.repeat.itemAlias || 'item'
@@ -1301,7 +1554,10 @@ function emitChild(
   const src = repeatItemsExpr(node.repeat.source)
   const el = emitElement(node, component, depth + 1, `key={${idx}}`, overlays)
   if (el === null) return null
-  return `${pad}{${src}.map((${alias}, ${idx}) => (\n${el}\n${pad}))}`
+  // Guard inside the map so a per-item presence keyed on the item alias resolves. The
+  // arrow returns a bare expression, so no JSX braces around the guard here.
+  const guarded = wrapPresence(node, el, '  '.repeat(depth + 1), false)
+  return `${pad}{${src}.map((${alias}, ${idx}) => (\n${guarded}\n${pad}))}`
 }
 
 function childrenJsx(
@@ -1344,7 +1600,8 @@ function emitRepeatWithSeparator(
   const el = emitElement(node, component, depth + 1, `key={\`i\${${idx}}\`}`, overlays)
   const sepEl = emitElement(sep, component, depth + 1, `key={\`s\${${idx}}\`}`, overlays)
   if (el === null) return null
-  return `${pad}{${src}.map((${alias}, ${idx}) => [\n${el},\n${pad}  ${idx} < ${src}.length - 1 ? (\n${sepEl}\n${pad}  ) : null,\n${pad}])}`
+  const guarded = wrapPresence(node, el, '  '.repeat(depth + 1), false)
+  return `${pad}{${src}.map((${alias}, ${idx}) => [\n${guarded},\n${pad}  ${idx} < ${src}.length - 1 ? (\n${sepEl}\n${pad}  ) : null,\n${pad}])}`
 }
 
 function emitElement(
@@ -1399,7 +1656,7 @@ function emitElement(
     selItem && tag !== 'button' && tag !== 'a' ? [{ prop: 'cursor', value: 'pointer' }] : []
 
   const srOnlyDecl = node.presentation === 'accessibleName' ? SR_ONLY_DECLS : []
-  const styleA = styleAttrsFor(node, [...nodeStyleDecls(node, tag), ...cursorDecl, ...srOnlyDecl])
+  const styleA = styleAttrsFor(node, [...nodeStyleDecls(node, tag), ...cursorDecl, ...srOnlyDecl]) + condAttrs(node)
   const key = keyAttr ? ` ${keyAttr}` : ''
 
   const triggerFor = overlays?.triggers.get(node.id)
@@ -1548,8 +1805,24 @@ function emitElement(
         return `${pad}<audio${key}${styleA}${handlerAttr} />`
       case 'embed':
         return `${pad}<iframe${key}${styleA}${handlerAttr} title="" />`
-      default:
-        return `${pad}<img${key}${styleA}${handlerAttr} alt="" />`
+      default: {
+        // `bind` — the consumer supplies the URL at runtime; the node's `sample` is a
+        // design-time-only preview aid (canvas/docs), never emitted here.
+        // `static` — the image IS the design system's content (logo, illustration);
+        // emits the resolved asset URL directly. NOTE (proposal 0028 §4): this is a
+        // web-native assumption (a literal <img src> URL) — true byte-vendoring, the
+        // way custom icon SVGs are inlined (0019), is deferred follow-up work, not
+        // built here.
+        const resolved = resolveMediaSource(node.mediaSource, activeAssets)
+        const srcA = resolved
+          ? resolved.kind === 'bind'
+            ? ` src={${bindingExpr(resolved.propName)}}`
+            : ` src=${JSON.stringify(resolved.url)}`
+          : ''
+        const altExpr = node.mediaAlt ? contentValueExpr(node.mediaAlt) : null
+        const altA = altExpr !== null ? ` alt={${altExpr}}` : ' alt=""'
+        return `${pad}<img${key}${styleA}${handlerAttr}${srcA}${altA} />`
+      }
     }
   }
 
@@ -1598,7 +1871,11 @@ function emitElement(
 
   const elTag = selItem?.itemRole && tag === 'li' ? 'div' : tag
   if (!kids.length) {
-    const inline = node.content ? textContent(node) : ''
+    // A default slot on a non-text node (a bare trigger meant to wrap whatever the
+    // consumer passes — Tooltip/Popover/Drawer) renders {children} exactly like a
+    // default-slot label does; `contentExpr` already resolves that regardless of
+    // kind, so this only needs to stop gating on `node.content` being set.
+    const inline = node.content || node.slot?.default ? textContent(node) : ''
     if (inline)
       return `${pad}<${elTag}${key}${labelA}${ariaA}${selA}${styleA}${handlerAttr}>${inline}</${elTag}>`
     return `${pad}<${elTag}${key}${labelA}${ariaA}${selA}${styleA}${handlerAttr} />`
@@ -1766,7 +2043,7 @@ function emitDisclosure(component: ComponentIR, plan: DisclosurePlan): string {
     `      {isOpen && createPortal(`,
     `        <>`,
     `          <div${backStyle}${backDismiss} />`,
-    `          <div${surfStyle}>${surfInner}</div>`,
+    `          <div${surfStyle} role="dialog" aria-modal="true">${surfInner}</div>`,
     `        </>,`,
     `        document.body,`,
     `      )}`,
@@ -1988,6 +2265,592 @@ function emitCombobox(component: ComponentIR, plan: DisclosurePlan): string {
     `}`,
     ``,
   ].join('\n')
+}
+
+// DatePicker view (proposal 0029). A thin renderer around the framework-agnostic
+// calendar core (targets/behavior/calendar.ts, vendored beside the component as
+// `./calendar`): all date math / grid / range logic lives there so every framework
+// target computes an identical calendar. This function only wires React state,
+// Intl labels, and per-anatomy styling, and converts between the calendar's
+// canonical YMD and the project's date representation at the boundary (v1: isoDate).
+function emitDatePicker(component: ComponentIR, options: EmitOptions): string {
+  const name = componentName(component)
+  const nodes = component.structure.nodes
+  const root = nodes[component.structure.rootId]
+  const tagFor = (n: ComponentNode) => resolveTag(n, component)
+  const sa = (n?: ComponentNode) => (n ? styleAttrsFor(n, nodeStyleDecls(n, tagFor(n))) : '')
+  const leaf = (n: ComponentNode) => n.part?.split('.').pop()
+  const byPart = (p: string) => Object.values(nodes).find((n) => leaf(n) === p)
+
+  const cfg = root.calendar ?? { selectionMode: 'single' as const, weekStartsOn: 0 as const }
+  const range = cfg.selectionMode === 'range'
+  const weekStartsOn = cfg.weekStartsOn ?? 0
+  const disabledWeekdays = cfg.disabledWeekdays ?? []
+
+  const valueNode = byPart('value')
+  const iconNode = byPart('icon')
+  const surface = byPart('surface')
+  const prev = byPart('prev')
+  const titleNode = byPart('title')
+  const next = byPart('next')
+  const grid = byPart('grid')
+  const dayNode = byPart('day')
+  const labelNode = byPart('label')
+
+  const rootStyle = styleAttrsFor(root, [...anchorDecls('popover'), ...nodeStyleDecls(root, 'div')])
+  const surfStyle = surface
+    ? styleAttrsFor(surface, [
+        ...surfacePositionDecls('popover'),
+        ...SURFACE_BASE,
+        ...nodeStyleDecls(surface, tagFor(surface)),
+      ])
+    : ''
+
+  const triggerNode = byPart('trigger')
+  const headerNode = byPart('header')
+  const trigTag = triggerNode ? tagFor(triggerNode) : 'button'
+  const surfTag = surface ? tagFor(surface) : 'div'
+  const headerTag = headerNode ? tagFor(headerNode) : 'div'
+  // Grid/day tags are FORCED regardless of anatomy role inference: the grid must be
+  // a `div role="grid"` (its row/cell children are not <li>), and each day must be
+  // an interactive, disable-able `<button>` (the `item` role would infer `<li>`,
+  // which cannot legally carry type/disabled/onClick). Their authored styles still
+  // apply via sa().
+  const gridTag = 'div'
+  const dayTag = 'button'
+  const labelTag = labelNode ? tagFor(labelNode) : 'span'
+  const valueTag = valueNode ? tagFor(valueNode) : 'span'
+  const titleTag = titleNode ? tagFor(titleNode) : 'span'
+  const prevTag = prev ? tagFor(prev) : 'button'
+  const nextTag = next ? tagFor(next) : 'button'
+
+  const iconLine = iconNode ? '\n        ' + iconSpan(iconNode) : ''
+  const labelInner = labelNode
+    ? '<' + labelTag + sa(labelNode) + '>{cell.date.day}</' + labelTag + '>'
+    : '{cell.date.day}'
+
+  // Date-value representation (proposal 0029 §4.1): a project-level choice covering
+  // the ecosystem union. The component body is representation-agnostic - it uses
+  // serialize (YMD -> boundary value) and deserialize (boundary value -> YMD); only
+  // these helpers and the DateValue type differ. asDate (YMD -> native Date) is used
+  // for Intl formatting and the escape-hatch predicates, independent of representation.
+  const rep = options.dateRepresentation ?? 'isoDate'
+  const rangeShape = options.dateRangeShape ?? 'object'
+
+  const REP: Record<string, { type: string; decls: string[] }> = {
+    isoDate: {
+      type: 'string',
+      decls: [
+        `const pad = (n: number) => String(n).padStart(2, '0')`,
+        `const serialize = (d: YMD): DateValue => d.year + '-' + pad(d.month) + '-' + pad(d.day)`,
+        `const deserialize = (v?: DateValue | null): YMD | null => {`,
+        `  if (!v) return null`,
+        `  const [y, m, d] = v.split('-').map(Number)`,
+        `  return Number.isFinite(y) && Number.isFinite(m) && Number.isFinite(d) ? { year: y, month: m, day: d } : null`,
+        `}`,
+      ],
+    },
+    nativeDate: {
+      type: 'Date',
+      decls: [
+        `const serialize = (d: YMD): DateValue => new Date(d.year, d.month - 1, d.day)`,
+        `const deserialize = (v?: DateValue | null): YMD | null => (v ? { year: v.getFullYear(), month: v.getMonth() + 1, day: v.getDate() } : null)`,
+      ],
+    },
+    epochMs: {
+      type: 'number',
+      decls: [
+        `const serialize = (d: YMD): DateValue => new Date(d.year, d.month - 1, d.day).getTime()`,
+        `const deserialize = (v?: DateValue | null): YMD | null => { if (v == null) return null; const d = new Date(v); return { year: d.getFullYear(), month: d.getMonth() + 1, day: d.getDate() } }`,
+      ],
+    },
+    ymd: {
+      type: '{ year: number; month: number; day: number }',
+      decls: [
+        `const serialize = (d: YMD): DateValue => ({ year: d.year, month: d.month, day: d.day })`,
+        `const deserialize = (v?: DateValue | null): YMD | null => v ?? null`,
+      ],
+    },
+  }
+  const repDef = REP[rep]
+
+  // Range value shape: object { start, end } (default) or positional tuple.
+  const rangeType = rangeShape === 'tuple' ? `[DateValue, DateValue]` : `{ start: DateValue; end: DateValue }`
+  const buildRange = (s: string, e: string) =>
+    // The tuple literal needs a cast: TS widens `[a, b]` to `DateValue[]`, not the
+    // `[DateValue, DateValue]` the value/state expect.
+    rangeShape === 'tuple' ? `[${s}, ${e}] as [DateValue, DateValue]` : `{ start: ${s}, end: ${e} }`
+  const readStart = (v: string) => (rangeShape === 'tuple' ? `${v}[0]` : `${v}.start`)
+  const readEnd = (v: string) => (rangeShape === 'tuple' ? `${v}[1]` : `${v}.end`)
+
+  const valueType = range ? rangeType : 'DateValue'
+  const coreFrom =
+    options.behaviorDelivery === 'package'
+      ? options.behaviorPackage || BEHAVIOR_PACKAGE_DEFAULT
+      : './calendar'
+  const importCore = range
+    ? `import { buildCalendar, compareYMD, type YMD } from '${coreFrom}'`
+    : `import { buildCalendar, type YMD } from '${coreFrom}'`
+
+  const lines: string[] = [
+    `'use client'`,
+    ``,
+    `import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'`,
+    importCore,
+    ...stylesImport(name),
+    ``,
+    `// Date-value representation: ${rep}. Dates cross the boundary as this type; the`,
+    `// calendar core always works in canonical { year, month, day } (1-12 month).`,
+    `type DateValue = ${repDef.type}`,
+    ...repDef.decls,
+    `const asDate = (d: YMD): Date => new Date(d.year, d.month - 1, d.day)`,
+    ``,
+    `export interface ${name}Props {`,
+    `  value?: ${valueType} | null`,
+    `  defaultValue?: ${valueType} | null`,
+    `  onValueChange?: (value: ${valueType} | null) => void`,
+    `  min?: DateValue`,
+    `  max?: DateValue`,
+    `  locale?: string`,
+    `  placeholder?: ReactNode`,
+    `  isDateDisabled?: (date: Date) => boolean`,
+    `  isDateHighlighted?: (date: Date) => boolean`,
+    `}`,
+    ``,
+    `export function ${name}({ value: valueProp, defaultValue, onValueChange, min, max, locale, placeholder, isDateDisabled, isDateHighlighted }: ${name}Props) {`,
+    `  const [open, setOpen] = useState(false)`,
+    `  const [internal, setInternal] = useState<${valueType} | null | undefined>(defaultValue)`,
+    `  const value = valueProp !== undefined ? valueProp : internal`,
+    `  const ref = useRef<HTMLDivElement>(null)`,
+    `  const today = useMemo(() => { const n = new Date(); return { year: n.getFullYear(), month: n.getMonth() + 1, day: n.getDate() } }, [])`,
+  ]
+
+  if (range) {
+    lines.push(
+      `  const [draft, setDraft] = useState<{ start: YMD; end: YMD | null } | null>(() => (value ? { start: deserialize(${readStart(
+        'value',
+      )})!, end: deserialize(${readEnd('value')})! } : null))`,
+      `  const [hover, setHover] = useState<YMD | null>(null)`,
+      `  const [displayed, setDisplayed] = useState(() => { const anchor = draft ? draft.start : today; return { year: anchor.year, month: anchor.month } })`,
+      `  const choose = (cell: YMD) => {`,
+      `    if (!draft || draft.end != null) { setDraft({ start: cell, end: null }); return }`,
+      `    const start = compareYMD(draft.start, cell) <= 0 ? draft.start : cell`,
+      `    const end = compareYMD(draft.start, cell) <= 0 ? cell : draft.start`,
+      `    setDraft({ start, end })`,
+      `    const next = ${buildRange('serialize(start)', 'serialize(end)')}`,
+      `    if (valueProp === undefined) setInternal(next)`,
+      `    onValueChange?.(next)`,
+      `    setOpen(false)`,
+      `  }`,
+    )
+  } else {
+    lines.push(
+      `  const selected = deserialize(value)`,
+      `  const [displayed, setDisplayed] = useState(() => { const anchor = selected ?? today; return { year: anchor.year, month: anchor.month } })`,
+      `  const choose = (cell: YMD) => {`,
+      `    const next = serialize(cell)`,
+      `    if (valueProp === undefined) setInternal(next)`,
+      `    onValueChange?.(next)`,
+      `    setOpen(false)`,
+      `  }`,
+    )
+  }
+
+  lines.push(
+    ``,
+    `  useEffect(() => {`,
+    `    if (!open) return`,
+    `    const onDown = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false) }`,
+    `    document.addEventListener('mousedown', onDown)`,
+    `    return () => document.removeEventListener('mousedown', onDown)`,
+    `  }, [open])`,
+    ``,
+    `  const model = buildCalendar({`,
+    `    displayedMonth: displayed,`,
+    `    mode: '${cfg.selectionMode}',`,
+    `    weekStartsOn: ${weekStartsOn},`,
+    `    disabledWeekdays: ${JSON.stringify(disabledWeekdays)},`,
+    range ? `    selection: draft,` : `    selection: selected,`,
+    range ? `    hoverPreview: hover,` : ``,
+    `    min: deserialize(min) ?? undefined,`,
+    `    max: deserialize(max) ?? undefined,`,
+    `    today,`,
+    `    isDateDisabled: isDateDisabled ? (d) => isDateDisabled(asDate(d)) : undefined,`,
+    `    isDateHighlighted: isDateHighlighted ? (d) => isDateHighlighted(asDate(d)) : undefined,`,
+    `  })`,
+    ``,
+    `  const monthFmt = new Intl.DateTimeFormat(locale, { month: 'long', year: 'numeric' })`,
+    `  const dowFmt = new Intl.DateTimeFormat(locale, { weekday: 'short' })`,
+    `  const dateFmt = new Intl.DateTimeFormat(locale, { dateStyle: 'medium' })`,
+    `  const title = monthFmt.format(new Date(model.displayedMonth.year, model.displayedMonth.month - 1, 1))`,
+    // 2023-01-01 is a Sunday, so index 0..6 maps to Sun..Sat weekday labels.
+    `  const weekdayLabels = model.weekdayOrder.map((wd) => dowFmt.format(new Date(2023, 0, 1 + wd)))`,
+    range
+      ? `  const triggerLabel = draft && draft.end ? dateFmt.format(asDate(draft.start)) + ' - ' + dateFmt.format(asDate(draft.end)) : placeholder`
+      : `  const triggerLabel = selected ? dateFmt.format(asDate(selected)) : placeholder`,
+    ``,
+    `  return (`,
+    `    <div ref={ref}${rootStyle}>`,
+    `      <${trigTag}${sa(triggerNode)} type="button" aria-haspopup="dialog" aria-expanded={open} onClick={() => setOpen((o) => !o)}>`,
+    `        <${valueTag}${sa(valueNode)}>{triggerLabel}</${valueTag}>` + iconLine,
+    `      </${trigTag}>`,
+    `      {open && (`,
+    `        <${surfTag}${surfStyle} role="dialog">`,
+    `          <${headerTag}${sa(headerNode)}>`,
+    `            <${prevTag}${sa(prev)} type="button" aria-label="Previous month" onClick={() => setDisplayed(model.prevMonth)}>{'\\u2039'}</${prevTag}>`,
+    `            <${titleTag}${sa(titleNode)}>{title}</${titleTag}>`,
+    `            <${nextTag}${sa(next)} type="button" aria-label="Next month" onClick={() => setDisplayed(model.nextMonth)}>{'\\u203a'}</${nextTag}>`,
+    `          </${headerTag}>`,
+    `          <${gridTag}${sa(grid)} role="grid" style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)' }}>`,
+    `            <div role="row" style={{ display: 'contents' }}>`,
+    `              {weekdayLabels.map((wl, i) => (<span key={i} role="columnheader" aria-hidden>{wl}</span>))}`,
+    `            </div>`,
+    `            {model.weeks.map((week, wi) => (`,
+    `              <div key={wi} role="row" style={{ display: 'contents' }}>`,
+    `                {week.map((cell) => (`,
+    `                  <${dayTag}${sa(dayNode)}`,
+    `                    key={cell.date.year + '-' + cell.date.month + '-' + cell.date.day}`,
+    `                    type="button"`,
+    `                    role="gridcell"`,
+    `                    disabled={cell.states.disabled}`,
+    `                    aria-disabled={cell.states.disabled || undefined}`,
+    `                    aria-selected={cell.states.selected || undefined}`,
+    `                    aria-current={cell.states.today ? 'date' : undefined}`,
+    `                    data-today={cell.states.today ? '' : undefined}`,
+    `                    data-selected={cell.states.selected ? '' : undefined}`,
+    `                    data-outside={cell.states.outsideMonth ? '' : undefined}`,
+    `                    data-range-start={cell.states.rangeStart ? '' : undefined}`,
+    `                    data-range-end={cell.states.rangeEnd ? '' : undefined}`,
+    `                    data-in-range={cell.states.inRange ? '' : undefined}`,
+    `                    data-highlighted={cell.states.highlighted ? '' : undefined}`,
+    range ? `                    onMouseEnter={() => setHover(cell.date)}` : ``,
+    `                    onClick={() => choose(cell.date)}`,
+    `                  >`,
+    `                    ${labelInner}`,
+    `                  </${dayTag}>`,
+    `                ))}`,
+    `              </div>`,
+    `            ))}`,
+    `          </${gridTag}>`,
+    `        </${surfTag}>`,
+    `      )}`,
+    `    </div>`,
+    `  )`,
+    `}`,
+    ``,
+  )
+
+  return lines.filter((l) => l !== '').join('\n') + '\n'
+}
+
+// TimePicker view (proposal 0029) - a thin renderer around the time behavior core
+// (targets/behavior/timepicker.ts, vendored beside the component as `./timepicker`):
+// slot generation lives there so every framework target computes an identical list.
+// This wires React state, Intl labels, per-anatomy styling, and converts between the
+// core's canonical { hour, minute } and the project's time representation (v1 default: isoTime).
+function emitTimePicker(component: ComponentIR, options: EmitOptions): string {
+  const name = componentName(component)
+  const nodes = component.structure.nodes
+  const root = nodes[component.structure.rootId]
+  const tagFor = (n: ComponentNode) => resolveTag(n, component)
+  const sa = (n?: ComponentNode) => (n ? styleAttrsFor(n, nodeStyleDecls(n, tagFor(n))) : '')
+  const leaf = (n: ComponentNode) => n.part?.split('.').pop()
+  const byPart = (p: string) => Object.values(nodes).find((n) => leaf(n) === p)
+
+  const cfg = root.timePicker ?? { step: 30, use24Hour: false }
+  const rep = options.timeRepresentation ?? 'isoTime'
+
+  const triggerNode = byPart('trigger')
+  const valueNode = byPart('value')
+  const iconNode = byPart('icon')
+  const surface = byPart('surface')
+  const optionNode = byPart('option')
+  const labelNode = byPart('label')
+
+  const trigTag = triggerNode ? tagFor(triggerNode) : 'button'
+  const surfTag = surface ? tagFor(surface) : 'div'
+  const valueTag = valueNode ? tagFor(valueNode) : 'span'
+  const labelTag = labelNode ? tagFor(labelNode) : 'span'
+
+  const rootStyle = styleAttrsFor(root, [...anchorDecls('popover'), ...nodeStyleDecls(root, 'div')])
+  const surfStyle = surface
+    ? styleAttrsFor(surface, [
+        ...surfacePositionDecls('popover'),
+        ...SURFACE_BASE,
+        ...nodeStyleDecls(surface, tagFor(surface)),
+      ])
+    : ''
+  const iconLine = iconNode ? '\n        ' + iconSpan(iconNode) : ''
+  const labelInner = labelNode
+    ? '<' + labelTag + sa(labelNode) + '>{label}</' + labelTag + '>'
+    : '{label}'
+
+  const REP: Record<string, { type: string; decls: string[] }> = {
+    isoTime: {
+      type: 'string',
+      decls: [
+        `const pad = (n: number) => String(n).padStart(2, '0')`,
+        `const serialize = (t: HM): TimeValue => pad(t.hour) + ':' + pad(t.minute)`,
+        `const deserialize = (v?: TimeValue | null): HM | null => {`,
+        `  if (!v) return null`,
+        `  const [h, m] = v.split(':').map(Number)`,
+        `  return Number.isFinite(h) && Number.isFinite(m) ? { hour: h, minute: m } : null`,
+        `}`,
+      ],
+    },
+    minutes: {
+      type: 'number',
+      decls: [
+        `const serialize = (t: HM): TimeValue => t.hour * 60 + t.minute`,
+        `const deserialize = (v?: TimeValue | null): HM | null => (v == null ? null : { hour: Math.floor(v / 60), minute: v % 60 })`,
+      ],
+    },
+    hm: {
+      type: '{ hour: number; minute: number }',
+      decls: [
+        `const serialize = (t: HM): TimeValue => ({ hour: t.hour, minute: t.minute })`,
+        `const deserialize = (v?: TimeValue | null): HM | null => v ?? null`,
+      ],
+    },
+  }
+  const repDef = REP[rep]
+
+  const lines: string[] = [
+    `'use client'`,
+    ``,
+    `import { useEffect, useRef, useState, type ReactNode } from 'react'`,
+    `import { buildTimeList, type HM } from '${options.behaviorDelivery === 'package' ? options.behaviorPackage || BEHAVIOR_PACKAGE_DEFAULT : './timepicker'}'`,
+    ...stylesImport(name),
+    ``,
+    `// Time-value representation: ${rep}. The core works in canonical { hour, minute } (24h).`,
+    `type TimeValue = ${repDef.type}`,
+    ...repDef.decls,
+    `const asDate = (t: HM): Date => new Date(2023, 0, 1, t.hour, t.minute)`,
+    ``,
+    `export interface ${name}Props {`,
+    `  value?: TimeValue | null`,
+    `  defaultValue?: TimeValue | null`,
+    `  onValueChange?: (value: TimeValue | null) => void`,
+    `  min?: TimeValue`,
+    `  max?: TimeValue`,
+    `  locale?: string`,
+    `  placeholder?: ReactNode`,
+    `  isTimeDisabled?: (time: Date) => boolean`,
+    `}`,
+    ``,
+    `export function ${name}({ value: valueProp, defaultValue, onValueChange, min, max, locale, placeholder, isTimeDisabled }: ${name}Props) {`,
+    `  const [open, setOpen] = useState(false)`,
+    `  const [internal, setInternal] = useState<TimeValue | null | undefined>(defaultValue)`,
+    `  const value = valueProp !== undefined ? valueProp : internal`,
+    `  const selected = deserialize(value)`,
+    `  const ref = useRef<HTMLDivElement>(null)`,
+    `  const choose = (t: HM) => {`,
+    `    const next = serialize(t)`,
+    `    if (valueProp === undefined) setInternal(next)`,
+    `    onValueChange?.(next)`,
+    `    setOpen(false)`,
+    `  }`,
+    ``,
+    `  useEffect(() => {`,
+    `    if (!open) return`,
+    `    const onDown = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false) }`,
+    `    document.addEventListener('mousedown', onDown)`,
+    `    return () => document.removeEventListener('mousedown', onDown)`,
+    `  }, [open])`,
+    ``,
+    `  const slots = buildTimeList({`,
+    `    step: ${Math.max(1, Math.floor(cfg.step))},`,
+    `    min: deserialize(min) ?? undefined,`,
+    `    max: deserialize(max) ?? undefined,`,
+    `    selection: selected,`,
+    `    isTimeDisabled: isTimeDisabled ? (t) => isTimeDisabled(asDate(t)) : undefined,`,
+    `  })`,
+    `  const timeFmt = new Intl.DateTimeFormat(locale, { hour: 'numeric', minute: '2-digit', hour12: ${cfg.use24Hour ? 'false' : 'true'} })`,
+    `  const fmt = (t: HM) => timeFmt.format(asDate(t))`,
+    `  const triggerLabel = selected ? fmt(selected) : placeholder`,
+    ``,
+    `  return (`,
+    `    <div ref={ref}${rootStyle}>`,
+    `      <${trigTag}${sa(triggerNode)} type="button" aria-haspopup="listbox" aria-expanded={open} onClick={() => setOpen((o) => !o)}>`,
+    `        <${valueTag}${sa(valueNode)}>{triggerLabel}</${valueTag}>` + iconLine,
+    `      </${trigTag}>`,
+    `      {open && (`,
+    `        <${surfTag}${surfStyle} role="listbox">`,
+    `          {slots.map((slot) => {`,
+    `            const label = fmt(slot.value)`,
+    `            return (`,
+    `              <${optionNode ? tagFor(optionNode) : 'div'}${sa(optionNode)}`,
+    `                key={slot.value.hour + ':' + slot.value.minute}`,
+    `                role="option"`,
+    `                aria-selected={slot.states.selected || undefined}`,
+    `                aria-disabled={slot.states.disabled || undefined}`,
+    `                data-selected={slot.states.selected ? '' : undefined}`,
+    `                data-disabled={slot.states.disabled ? '' : undefined}`,
+    `                style={{ cursor: slot.states.disabled ? 'not-allowed' : 'pointer' }}`,
+    `                onClick={() => { if (!slot.states.disabled) choose(slot.value) }}`,
+    `              >`,
+    `                ${labelInner}`,
+    `              </${optionNode ? tagFor(optionNode) : 'div'}>`,
+    `            )`,
+    `          })}`,
+    `        </${surfTag}>`,
+    `      )}`,
+    `    </div>`,
+    `  )`,
+    `}`,
+    ``,
+  ]
+
+  return lines.filter((l) => l !== '').join('\n') + '\n'
+}
+
+// ColorPicker view (proposal 0029) - a thin renderer around the shared color core
+// (targets/behavior/color.ts, vendored beside the component as `./color`): all the
+// HSV/RGB/hex math + area/hue geometry lives there so every framework target computes
+// an identical picker. This wires React state + pointer drag on the saturation/value
+// area and hue slider, and converts between the core's canonical HSV and the project's
+// representation (v1 default: hex) at the boundary. The hex text input is always the
+// universal editable form; the trigger swatch shows the live color.
+function emitColorPicker(component: ComponentIR, options: EmitOptions): string {
+  const name = componentName(component)
+  const nodes = component.structure.nodes
+  const root = nodes[component.structure.rootId]
+  const tagFor = (n: ComponentNode) => resolveTag(n, component)
+  const sa = (n?: ComponentNode) => (n ? styleAttrsFor(n, nodeStyleDecls(n, tagFor(n))) : '')
+  const leaf = (n: ComponentNode) => n.part?.split('.').pop()
+  const byPart = (p: string) => Object.values(nodes).find((n) => leaf(n) === p)
+
+  const rep = options.colorRepresentation ?? 'hex'
+  const triggerNode = byPart('trigger')
+  const swatchNode = byPart('swatch')
+  const valueNode = byPart('value')
+  const surface = byPart('surface')
+  const areaNode = byPart('area')
+  const hueNode = byPart('hue')
+  const inputNode = byPart('input')
+
+  const trigTag = triggerNode ? tagFor(triggerNode) : 'button'
+  const surfTag = surface ? tagFor(surface) : 'div'
+  const valueTag = valueNode ? tagFor(valueNode) : 'span'
+
+  const rootStyle = styleAttrsFor(root, [...anchorDecls('popover'), ...nodeStyleDecls(root, 'div')])
+  const surfStyle = surface
+    ? styleAttrsFor(surface, [...surfacePositionDecls('popover'), ...SURFACE_BASE, ...nodeStyleDecls(surface, tagFor(surface))])
+    : ''
+
+  // Representation: HSV is canonical inside; serialize/deserialize convert at the boundary.
+  const REP: Record<string, { type: string; imports: string[]; serialize: string; deserialize: string }> = {
+    hex: { type: 'string', imports: ['hsvToHex', 'hexToHsv'], serialize: 'hsvToHex(c)', deserialize: 'v ? hexToHsv(v) : null' },
+    rgb: {
+      type: '{ r: number; g: number; b: number }',
+      imports: ['hsvToRgb', 'rgbToHsv'],
+      serialize: 'hsvToRgb(c)',
+      deserialize: 'v ? rgbToHsv(v) : null',
+    },
+    hsl: {
+      type: '{ h: number; s: number; l: number }',
+      imports: ['hsvToRgb', 'rgbToHsv', 'rgbToHsl', 'hslToRgb'],
+      serialize: 'rgbToHsl(hsvToRgb(c))',
+      deserialize: 'v ? rgbToHsv(hslToRgb(v)) : null',
+    },
+  }
+  const repDef = REP[rep]
+  // hexToHsv drives the always-present hex text input; buildColor/hsvFromArea/hueFromTrack the geometry.
+  const coreImports = Array.from(new Set(['buildColor', 'hsvFromArea', 'hueFromTrack', 'hexToHsv', ...repDef.imports])).sort()
+
+  const areaBg =
+    "'linear-gradient(to top, #000, rgba(0,0,0,0)), linear-gradient(to right, #fff, ' + model.hueCss + ')'"
+  const hueBg = "'linear-gradient(to right, #f00, #ff0, #0f0, #0ff, #00f, #f0f, #f00)'"
+
+  const lines: string[] = [
+    `'use client'`,
+    ``,
+    `import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'`,
+    `import { ${coreImports.join(', ')}, type HSV } from '${
+      options.behaviorDelivery === 'package' ? options.behaviorPackage || BEHAVIOR_PACKAGE_DEFAULT : './color'
+    }'`,
+    ...stylesImport(name),
+    ``,
+    `// Color-value representation: ${rep}. The core works in canonical HSV.`,
+    `type ColorValue = ${repDef.type}`,
+    `const serialize = (c: HSV): ColorValue => ${repDef.serialize}`,
+    `const deserialize = (v?: ColorValue | null): HSV | null => ${repDef.deserialize}`,
+    ``,
+    `export interface ${name}Props {`,
+    `  value?: ColorValue | null`,
+    `  defaultValue?: ColorValue | null`,
+    `  onValueChange?: (value: ColorValue) => void`,
+    `}`,
+    ``,
+    `export function ${name}({ value: valueProp, defaultValue, onValueChange }: ${name}Props) {`,
+    `  const [open, setOpen] = useState(false)`,
+    `  const [internal, setInternal] = useState<ColorValue | null | undefined>(defaultValue)`,
+    `  const value = valueProp !== undefined ? valueProp : internal`,
+    `  const [hsv, setHsv] = useState<HSV>(() => deserialize(value) ?? { h: 0, s: 1, v: 1 })`,
+    `  const ref = useRef<HTMLDivElement>(null)`,
+    `  const model = buildColor(hsv)`,
+    ``,
+    `  // Keep the working HSV in sync when a controlled value changes underneath us.`,
+    `  useEffect(() => { if (valueProp !== undefined) { const next = deserialize(valueProp); if (next) setHsv(next) } }, [valueProp])`,
+    ``,
+    `  const commit = (next: HSV) => {`,
+    `    setHsv(next)`,
+    `    const out = serialize(next)`,
+    `    if (valueProp === undefined) setInternal(out)`,
+    `    onValueChange?.(out)`,
+    `  }`,
+    ``,
+    `  useEffect(() => {`,
+    `    if (!open) return`,
+    `    const onDown = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false) }`,
+    `    document.addEventListener('mousedown', onDown)`,
+    `    return () => document.removeEventListener('mousedown', onDown)`,
+    `  }, [open])`,
+    ``,
+    `  // Pointer-drag the saturation/value area (hue fixed) and the hue track.`,
+    `  const dragArea = (e: ReactPointerEvent) => {`,
+    `    const rect = e.currentTarget.getBoundingClientRect()`,
+    `    const at = (cx: number, cy: number) => commit(hsvFromArea(hsv.h, (cx - rect.left) / rect.width, (cy - rect.top) / rect.height))`,
+    `    at(e.clientX, e.clientY)`,
+    `    const move = (ev: PointerEvent) => at(ev.clientX, ev.clientY)`,
+    `    const up = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up) }`,
+    `    window.addEventListener('pointermove', move); window.addEventListener('pointerup', up)`,
+    `  }`,
+    `  const dragHue = (e: ReactPointerEvent) => {`,
+    `    const rect = e.currentTarget.getBoundingClientRect()`,
+    `    const at = (cx: number) => commit({ ...hsv, h: hueFromTrack((cx - rect.left) / rect.width) })`,
+    `    at(e.clientX)`,
+    `    const move = (ev: PointerEvent) => at(ev.clientX)`,
+    `    const up = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up) }`,
+    `    window.addEventListener('pointermove', move); window.addEventListener('pointerup', up)`,
+    `  }`,
+    ``,
+    `  return (`,
+    `    <div ref={ref}${rootStyle}>`,
+    `      <${trigTag}${sa(triggerNode)} type="button" aria-haspopup="dialog" aria-expanded={open} onClick={() => setOpen((o) => !o)}>`,
+    swatchNode
+      ? `        <${tagFor(swatchNode)}${sa(swatchNode)} aria-hidden style={{ background: model.hex }} />`
+      : `        <span aria-hidden style={{ width: '1em', height: '1em', borderRadius: '3px', background: model.hex }} />`,
+    `        <${valueTag}${sa(valueNode)}>{model.hex}</${valueTag}>`,
+    `      </${trigTag}>`,
+    `      {open && (`,
+    `        <${surfTag}${surfStyle} role="dialog">`,
+    `          <${areaNode ? tagFor(areaNode) : 'div'}${sa(areaNode)} onPointerDown={dragArea} style={{ position: 'relative', width: '100%', height: '9rem', borderRadius: '6px', touchAction: 'none', cursor: 'crosshair', background: ${areaBg} }}>`,
+    `            <span aria-hidden style={{ position: 'absolute', left: (model.area.x * 100) + '%', top: (model.area.y * 100) + '%', width: '12px', height: '12px', transform: 'translate(-50%, -50%)', borderRadius: '50%', border: '2px solid #fff', boxShadow: '0 0 0 1px rgba(0,0,0,0.4)' }} />`,
+    `          </${areaNode ? tagFor(areaNode) : 'div'}>`,
+    `          <${hueNode ? tagFor(hueNode) : 'div'}${sa(hueNode)} onPointerDown={dragHue} style={{ position: 'relative', width: '100%', height: '0.75rem', marginTop: '0.5rem', borderRadius: '999px', touchAction: 'none', cursor: 'ew-resize', background: ${hueBg} }}>`,
+    `            <span aria-hidden style={{ position: 'absolute', left: (model.hueX * 100) + '%', top: '50%', width: '14px', height: '14px', transform: 'translate(-50%, -50%)', borderRadius: '50%', border: '2px solid #fff', boxShadow: '0 0 0 1px rgba(0,0,0,0.4)', background: model.hueCss }} />`,
+    `          </${hueNode ? tagFor(hueNode) : 'div'}>`,
+    `          <input${sa(inputNode)} type="text" value={model.hex} aria-label="Hex color" onChange={(e) => { const next = hexToHsv(e.target.value); if (next) commit(next) }} style={{ marginTop: '0.5rem', width: '100%' }} />`,
+    `        </${surfTag}>`,
+    `      )}`,
+    `    </div>`,
+    `  )`,
+    `}`,
+    ``,
+  ]
+
+  return lines.filter((l) => l !== '').join('\n') + '\n'
 }
 
 function emitMenu(
@@ -2283,6 +3146,57 @@ function emitCompound(
   return out.join('\n')
 }
 
+// Resolve an anchor node id (referenced by a rule's `ancestorStates`) to its node + tree
+// depth, so the sheet can emit `.ancestor:state .self` and order multiple anchors from
+// outermost to innermost. Only meaningful on the generic emission path, where the node
+// tree maps 1:1 to DOM nesting. Depth = distance from the root (root = 0).
+function buildAnchorResolver(
+  component: ComponentIR,
+): (nodeId: string) => { node: ComponentNode; depth: number } | undefined {
+  const nodes = component.structure.nodes
+  const depth = new Map<string, number>()
+  const walk = (id: string, d: number) => {
+    const node = nodes[id]
+    if (!node) return
+    depth.set(id, d)
+    for (const childId of node.childrenIds ?? []) walk(childId, d + 1)
+  }
+  walk(component.structure.rootId, 0)
+  return (nodeId) => {
+    const node = nodes[nodeId]
+    const d = depth.get(nodeId)
+    return node && d !== undefined ? { node, depth: d } : undefined
+  }
+}
+
+// For a node's self state, the nearest ANCESTOR that CONTROLS it (holds a stateBinding for that
+// state) — so the sheet can re-scope a part's `onSelected`/`onChecked`/… rule under the controlling
+// ancestor (`.root[data-selected] .indicator`) instead of emitting the dead self-scoped
+// `.indicator[data-selected]`. Mirrors the preview, where the root's controlled state flows down to
+// all parts (recipes.ts `controlled`). Walks strictly UPWARD, so the controlling node's OWN rule
+// (root) stays self-scoped and the returned owner is always a genuine DOM ancestor.
+function buildControlledStateAnchor(
+  component: ComponentIR,
+): (nodeId: string, state: StateName) => string | undefined {
+  const nodes = component.structure.nodes
+  const parent = new Map<string, string>()
+  const walk = (id: string) => {
+    for (const childId of nodes[id]?.childrenIds ?? []) {
+      parent.set(childId, id)
+      walk(childId)
+    }
+  }
+  walk(component.structure.rootId)
+  return (nodeId, state) => {
+    let cur = parent.get(nodeId)
+    while (cur) {
+      if (nodes[cur]?.stateBindings?.some((b) => b.state === state)) return cur
+      cur = parent.get(cur)
+    }
+    return undefined
+  }
+}
+
 function emitComponent(
   component: ComponentIR,
   options: EmitOptions = {},
@@ -2291,6 +3205,7 @@ function emitComponent(
   activeSheet = new StyleSheet()
   usesIconComponent = false
   usesIconNameType = false
+  usesMildaContext = false
   activeInstances = new Set()
   activeProps = new Map((component.contract?.props ?? []).map((p) => [p.name, p]))
   activeEventNames = new Map((component.contract?.events ?? []).map((e) => [e.id, e.name]))
@@ -2304,10 +3219,27 @@ function emitComponent(
   activeAssets = options.assets
   componentsById = new Map(Object.entries(options.componentsById ?? {}))
 
-  activeA11y = { labelId: new Map(), controlId: new Map(), labelFor: new Map(), needsUseId: false }
+  activeA11y = {
+    labelId: new Map(),
+    controlId: new Map(),
+    labelFor: new Map(),
+    describedId: new Map(),
+    needsUseId: false,
+  }
   const name = componentName(component)
   const root = component.structure.nodes[component.structure.rootId]
   if (!root) return { tsx: `export function ${name}() {\n  return null\n}\n`, css: '' }
+
+  // DatePicker has its own view over the shared calendar core (proposal 0029).
+  if (component.archetype === 'DatePicker') {
+    return { tsx: emitDatePicker(component, options), css: activeSheet.toCss() }
+  }
+  if (component.archetype === 'TimePicker') {
+    return { tsx: emitTimePicker(component, options), css: activeSheet.toCss() }
+  }
+  if (component.archetype === 'ColorPicker') {
+    return { tsx: emitColorPicker(component, options), css: activeSheet.toCss() }
+  }
 
   const slots = collectSlots(component).filter((s) => !component.structure.nodes[s.nodeId]?.repeat)
   if (slots.length > 0 && (options.emitStyle ?? 'compound') !== 'props') {
@@ -2315,7 +3247,10 @@ function emitComponent(
   }
 
   const plan = planBehavior(component)
-  if (plan?.kind === 'disclosure') {
+  // The vertical emitters cover activate-opened, trigger-owned popups. Plans the
+  // preview realizes beyond that (hover tooltips, context menus, standalone menus,
+  // inline disclosures) keep the generic emission path for now.
+  if (plan?.kind === 'disclosure' && plan.openOn === 'activate' && !plan.standalone) {
     if (plan.surfaceKind === 'dialog')
       return { tsx: emitDisclosure(component, plan), css: activeSheet.toCss() }
 
@@ -2342,10 +3277,22 @@ function emitComponent(
 
   activeA11y = planA11y(component)
 
+  // Generic path only: node ancestry equals DOM ancestry here, so a rule's ancestorStates
+  // can be emitted as descendant selectors under the referenced ancestor. (The compound/
+  // overlay/menu/date emitters above returned already, leaving the resolver unset → self.)
+  activeSheet.setAnchorResolver(buildAnchorResolver(component))
+  // Re-scope a fixed part's rule keyed on a ROOT-controlled state under that root, so a toggle's
+  // icon/label actually restyle when ON in the generated CSS (matching the preview cascade).
+  activeSheet.setControlledStateAnchor(buildControlledStateAnchor(component))
+
   const tag = resolveTag(root, component)
 
   const togglePlan = tag === 'button' || tag === 'a' ? planToggle(component) : null
   const overlayPlan = planOverlays(component)
+
+  // A toggle realizes its on-state as `data-<state>` + aria-pressed (see rootData below), not
+  // the input pseudo `:checked`/`:active` — so rules keyed on that state must select the attr.
+  activeSheet.setDataStates(togglePlan ? new Set([togglePlan.dataState]) : undefined)
 
   const hostsAnchoredOverlay = [...overlayPlan.surfaces.values()].some((o) => !o.modal)
   const rootAnchor = hostsAnchoredOverlay ? [{ prop: 'position', value: 'relative' }] : []
@@ -2437,7 +3384,8 @@ function emitComponent(
     ? [`  const [_${te.prop}, _set${pascalCase(te.prop)}] = useState(${te.prop} ?? '')`]
     : []
   const needsUseId = activeA11y.needsUseId
-  const needsClient = hasOverlays || needsUseId || !!sel || !!togglePlan || !!step || !!sl || !!te
+  // A context-gated predicate (0032 phase 4) needs the MildaContext hook → 'use client'.
+  const needsClient = hasOverlays || needsUseId || !!sel || !!togglePlan || !!step || !!sl || !!te || usesMildaContext
   const reactHooks = [
     ...(hasOverlays || sel || togglePlan || step || sl || te ? ['useState'] : []),
     ...(overlayList.some((o) => o.dismissable) ? ['useEffect'] : []),
@@ -2449,14 +3397,16 @@ function emitComponent(
     ? [
         `'use client'`,
         ``,
-        `import { ${reactHooks.join(', ')} } from 'react'`,
+        ...(reactHooks.length ? [`import { ${reactHooks.join(', ')} } from 'react'`] : []),
         ...(overlayList.some((o) => o.modal) ? [`import { createPortal } from 'react-dom'`] : []),
         ``,
       ]
     : []
   const a11yState = needsUseId ? [`  const _aid = useId()`] : []
+  const mildaCtxState = usesMildaContext ? [`  const _mildaCtx = useMildaContext()`] : []
   const bodyPrelude = needsClient
     ? [
+        ...mildaCtxState,
         ...a11yState,
         ...overlayState,
         ...selState,
@@ -2543,6 +3493,10 @@ function emitComponent(
     const customNames = names.filter((n) => !NATIVE_PROP_NAMES.has(n))
     const nativeApply = spread ? '' : nativeContractNames.map((n) => ` ${n}={${n}}`).join('')
 
+    // Navigation destination: an <a> root lowers node.destination (static or prop-bound)
+    // to the native href. Decoupled from prop names — the author declares the binding.
+    const destExpr = tag === 'a' && root.destination ? ` href={${contentValueExpr(root.destination)}}` : ''
+
     const destructure = [
       ...(bodyUsesChildren ? ['children'] : []),
       ...(exposesClass ? ['className'] : []),
@@ -2558,6 +3512,7 @@ function emitComponent(
         ...runtimeImports,
         ...(importLine ? [importLine] : []),
         ...iconModuleImport(),
+        ...mildaContextImport(),
         ...instanceImport(),
         ...stylesImport(name),
         ``,
@@ -2566,7 +3521,7 @@ function emitComponent(
         `export function ${name}({ ${destructure} }: ${name}Props) {`,
         ...bodyPrelude,
         `  return (`,
-        `    <${tag}${spread ? ' {...props}' : ''}${classExpr}${nativeApply}${rootData}${a11yLabelAttrs(root)}${a11yAttrs(root)}${rootHandlers}${styleExpr}>${inner}</${tag}>`,
+        `    <${tag}${spread ? ' {...props}' : ''}${classExpr}${nativeApply}${destExpr}${rootData}${a11yLabelAttrs(root)}${a11yAttrs(root)}${rootHandlers}${styleExpr}>${inner}</${tag}>`,
         `  )`,
         `}`,
         ``,
@@ -2599,6 +3554,7 @@ function emitComponent(
       ...runtimeImports,
       ...(needsReactNode ? [`import type { ReactNode } from 'react'`] : []),
       ...iconModuleImport(),
+      ...mildaContextImport(),
       ...instanceImport(),
       ...stylesImport(name),
       ``,

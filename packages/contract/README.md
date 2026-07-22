@@ -1,19 +1,19 @@
 # @mildastudio/contract
 
-Contract **digest, diff, and variance** for Milda components — the layer that
+Contract **digest, diff, and variance** for Milda components - the layer that
 turns "the IR is the contract" into real semantic versioning.
 
 A component's public surface (props, events, slots, types) is hashed into a
 stable **digest**; two digests can be **diffed** into a set of changes; and each
-change is classified by **variance** (its polarity — is it safe, additive, or
+change is classified by **variance** (its polarity - is it safe, additive, or
 breaking for consumers?). That classification drives automatic semver decisions.
 
 ## What's in here
 
-- **digest** — reduces a component's `ComponentIR` contract to a stable,
+- **digest** - reduces a component's `ComponentIR` contract to a stable,
   order-independent fingerprint.
-- **diff** — computes the structural changes between two contract versions.
-- **variance** — the polarity rules that map each change to backwards-compatible,
+- **diff** - computes the structural changes between two contract versions.
+- **variance** - the polarity rules that map each change to backwards-compatible,
   additive, or breaking, so a release can pick the right semver bump.
 
 ## Design invariants
@@ -25,7 +25,7 @@ breaking for consumers?). That classification drives automatic semver decisions.
 
 ## Status
 
-`0.x` — unstable until `1.0`. Depends on [`@mildastudio/core`](../core).
+`0.x` - unstable until `1.0`. Depends on [`@mildastudio/core`](../core).
 
 ## License
 

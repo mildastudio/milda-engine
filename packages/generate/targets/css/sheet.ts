@@ -2,6 +2,8 @@ import {
   facetCssVar,
   facetDecls,
   layoutVarDecls,
+  representablePredicate,
+  dataCondAttr,
   type ComponentNode,
   type PropCondition,
   type StateName,
@@ -29,6 +31,14 @@ export const STATE_SELECTOR: Record<StateName, string> = {
   last: ':last-child',
   odd: ':nth-child(odd)',
   even: ':nth-child(even)',
+  // Calendar/time cell states (proposal 0029) - match the data-* attrs the
+  // DatePicker/TimePicker emitters put on each day/option cell.
+  today: '[data-today]',
+  'outside-month': '[data-outside]',
+  'range-start': '[data-range-start]',
+  'range-end': '[data-range-end]',
+  'in-range': '[data-in-range]',
+  highlighted: '[data-highlighted]',
 }
 
 function cssProp(prop: string): string {
@@ -55,12 +65,26 @@ export function variantDataAttr(prop: string): string {
 
 const leafOf = (node: ComponentNode): string | undefined => node.part?.split('.').pop()
 
-function ruleSuffix(rule: StateRule): string {
-  const propParts = Object.entries(rule.props).map(
-    ([k, v]) => `[${variantDataAttr(k)}="${String(v)}"]`,
-  )
-  const stateParts = rule.states.map((s) => STATE_SELECTOR[s])
-  return [...propParts, ...stateParts].join('')
+function propsSuffix(props: StateRule['props']): string {
+  return Object.entries(props)
+    .map(([k, v]) => `[${variantDataAttr(k)}="${String(v)}"]`)
+    .join('')
+}
+
+// A state's selector, honoring per-component DATA realization: a toggle button drives its
+// `checked`/`pressed`/`selected` on-state via `data-<state>` (+ aria-pressed), NOT the input
+// pseudo `:checked`/`:active` (which never matches a <button>). When the state is data-realized
+// for this component, key off `[data-<state>]` so the rule actually matches the emitted attr.
+function stateSel(s: StateName, dataStates?: ReadonlySet<string>): string {
+  return dataStates?.has(s) ? `[data-${s}]` : STATE_SELECTOR[s]
+}
+
+function statesSuffix(states: readonly StateName[], dataStates?: ReadonlySet<string>): string {
+  return states.map((s) => stateSel(s, dataStates)).join('')
+}
+
+function ruleSuffix(rule: StateRule, dataStates?: ReadonlySet<string>): string {
+  return `${propsSuffix(rule.props)}${statesSuffix(rule.states, dataStates)}`
 }
 
 export function variantProps(node: ComponentNode): string[] {
@@ -88,6 +112,40 @@ export class StyleSheet {
   private used = new Map<string, number>()
   private done = new Set<string>()
   private blocks: string[] = []
+  // Resolves an anchor node (referenced by a rule's `ancestorStates`) to its node + tree
+  // depth, so a descendant rule can be emitted as a descendant selector under that ancestor
+  // (`.button:hover .icon`). The emitter sets this ONLY for the generic tree-mapped path,
+  // where node ancestry equals DOM ancestry; the compound/overlay emitters restructure the
+  // DOM and leave it unset — an anchored rule then falls back to self-scoped (safe).
+  private anchorResolver:
+    | ((nodeId: string) => { node: ComponentNode; depth: number } | undefined)
+    | undefined
+
+  setAnchorResolver(
+    fn: ((nodeId: string) => { node: ComponentNode; depth: number } | undefined) | undefined,
+  ): void {
+    this.anchorResolver = fn
+  }
+
+  // States this component realizes as `data-<state>` rather than a native pseudo — e.g. a
+  // toggle button's `checked`/`pressed`/`selected` (driven by aria-pressed + data-<state>),
+  // which `:checked`/`:active` would never match. Set per-component by the emitter.
+  private dataStates: ReadonlySet<string> | undefined
+  setDataStates(states: ReadonlySet<string> | undefined): void {
+    this.dataStates = states
+  }
+
+  // Resolves, for a node's self state, the nearest ANCESTOR node that CONTROLS that state (holds
+  // a stateBinding for it) — or undefined. A toggle's `selected` lives as `data-selected` on the
+  // ROOT only, never on a fixed part, so a part's `onSelected` rule emitted self-scoped
+  // (`.indicator[data-selected]`) is dead in the generated CSS even though the preview restyles it
+  // (activeUIStates flows to all parts). When set, `ruleSelector` folds such a self state into an
+  // implicit ancestorState so it emits `.root[data-selected] .indicator` — the generated mirror of
+  // that cascade. Set (with the anchor resolver) ONLY on the generic tree-mapped path.
+  private controlledAnchor: ((nodeId: string, state: StateName) => string | undefined) | undefined
+  setControlledStateAnchor(fn: ((nodeId: string, state: StateName) => string | undefined) | undefined): void {
+    this.controlledAnchor = fn
+  }
 
   private allocate(node: ComponentNode): string {
     const cached = this.names.get(node.id)
@@ -106,6 +164,58 @@ export class StyleSheet {
     this.blocks.push(`${selector} {\n${body}\n}`)
   }
 
+  // Build a rule's selector. A rule's own props/states stay on the node (`.icon:hover`);
+  // its `ancestorStates` become a descendant selector under each referenced ancestor
+  // (`.button:hover .icon`) so the child restyles when that ancestor enters the state,
+  // matching the editor. Multiple anchors nest outermost-first by tree depth. If no
+  // anchor resolves (unset resolver / unknown id), the rule falls back to self-scoped.
+  private ruleSelector(name: string, nodeId: string, rule: StateRule): string {
+    // Rich `when` predicate (0032): a representable one decomposes back to the props/states/
+    // ancestorStates selector path below; anything richer keys off a computed `[data-cond-<id>]`
+    // attribute the React generator sets (so OR/NOT/operators still restyle).
+    if (rule.when) {
+      const rep = representablePredicate(rule.when)
+      if (rep === null) return `.${name}[${dataCondAttr(rule)}]`
+      rule = { ...rule, when: undefined, props: rep.props, states: rep.states, ancestorStates: rep.ancestorStates }
+    }
+    // Fold any self state that's controlled on an ANCESTOR into an implicit ancestorState (only
+    // when we can actually emit the anchor — anchorResolver present), so `.part[data-selected]`
+    // (dead: the part never gets data-selected) becomes `.root[data-selected] .part`.
+    let eff = rule
+    if (this.anchorResolver && this.controlledAnchor && rule.states.length) {
+      const synth: { nodeId: string; state: StateName }[] = []
+      const selfStates: StateName[] = []
+      for (const s of rule.states) {
+        const owner = this.controlledAnchor(nodeId, s)
+        if (owner) synth.push({ nodeId: owner, state: s })
+        else selfStates.push(s)
+      }
+      if (synth.length) {
+        eff = { ...rule, states: selfStates, ancestorStates: [...(rule.ancestorStates ?? []), ...synth] }
+      }
+    }
+
+    const selfSel = `.${name}${ruleSuffix(eff, this.dataStates)}`
+    const conds = eff.ancestorStates ?? []
+    if (conds.length === 0 || !this.anchorResolver) return selfSel
+
+    const byNode = new Map<string, { node: ComponentNode; depth: number; states: StateName[] }>()
+    for (const c of conds) {
+      const resolved = this.anchorResolver(c.nodeId)
+      if (!resolved) continue
+      const entry = byNode.get(c.nodeId) ?? { ...resolved, states: [] }
+      entry.states.push(c.state)
+      byNode.set(c.nodeId, entry)
+    }
+    if (byNode.size === 0) return selfSel
+
+    const chain = [...byNode.values()]
+      .sort((a, b) => a.depth - b.depth)
+      .map((a) => `.${this.allocate(a.node)}${statesSuffix(a.states, this.dataStates)}`)
+      .join(' ')
+    return `${chain} ${selfSel}`
+  }
+
   register(node: ComponentNode, baseDecls: StyleDecl[]): NodeStyleBinding {
     const rules = node.states ?? []
     const hasBase = baseDecls.length > 0
@@ -116,7 +226,7 @@ export class StyleSheet {
     if (!this.done.has(node.id)) {
       this.done.add(node.id)
       if (hasBase) this.serialize(`.${name}`, baseDecls)
-      for (const rule of rules) this.serialize(`.${name}${ruleSuffix(rule)}`, ruleDecls(rule))
+      for (const rule of rules) this.serialize(this.ruleSelector(name, node.id, rule), ruleDecls(rule))
     }
     return {
       className: name,

@@ -4,7 +4,9 @@
     "**/*.ts"
   ],
   "exclude": [
-    "node_modules"
+    "node_modules",
+    "targets/behavior/genCalendarSource.ts",
+    "targets/behavior/calendar.test.ts"
   ],
   "compilerOptions": {
     "incremental": false

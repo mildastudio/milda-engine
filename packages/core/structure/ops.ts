@@ -17,11 +17,23 @@ import type {
   EventEmission,
   ForeignContent,
   MediaType,
+  MediaSource,
   NodeMotion,
+  NodeCalendar,
+  NodeTimePicker,
+  AlertSeverity,
+  AccordionMode,
+  NodeTabs,
+  NodeSlider,
+  NodeRating,
+  NodeColorPicker,
+  NodeOverlay,
   StateRule,
   ValueSpec,
+  ContentValue,
 } from './types'
 import type { NodeBehavior } from '../behavior/free'
+import { isUnconditional, type Predicate } from './predicate'
 import {
   customToggleVariant,
   checkboxGlyphChild,
@@ -283,6 +295,57 @@ export function setMedia(
   return next
 }
 
+export function setMediaSource(
+  structure: ComponentStructure,
+  nodeId: string,
+  mediaSource: MediaSource | null,
+): ComponentStructure {
+  const node = structure.nodes[nodeId]
+  if (!node) return structure
+  const next = clone(structure)
+  if (mediaSource === null) {
+    const { mediaSource: _removed, ...rest } = node
+    next.nodes[nodeId] = rest
+  } else {
+    next.nodes[nodeId] = { ...node, mediaSource }
+  }
+  return next
+}
+
+export function setMediaAlt(
+  structure: ComponentStructure,
+  nodeId: string,
+  mediaAlt: ContentValue | null,
+): ComponentStructure {
+  const node = structure.nodes[nodeId]
+  if (!node) return structure
+  const next = clone(structure)
+  if (mediaAlt === null) {
+    const { mediaAlt: _removed, ...rest } = node
+    next.nodes[nodeId] = rest
+  } else {
+    next.nodes[nodeId] = { ...node, mediaAlt }
+  }
+  return next
+}
+
+export function setDestination(
+  structure: ComponentStructure,
+  nodeId: string,
+  destination: ContentValue | null,
+): ComponentStructure {
+  const node = structure.nodes[nodeId]
+  if (!node) return structure
+  const next = clone(structure)
+  if (destination === null) {
+    const { destination: _removed, ...rest } = node
+    next.nodes[nodeId] = rest
+  } else {
+    next.nodes[nodeId] = { ...node, destination }
+  }
+  return next
+}
+
 export function setComposes(
   structure: ComponentStructure,
   nodeId: string,
@@ -516,6 +579,135 @@ export function setNodeMotion(
     next.nodes[nodeId] = rest
   } else {
     next.nodes[nodeId] = { ...node, motion }
+  }
+  return next
+}
+
+export function setCalendar(
+  structure: ComponentStructure,
+  nodeId: string,
+  calendar: NodeCalendar | null,
+): ComponentStructure {
+  const node = structure.nodes[nodeId]
+  if (!node) return structure
+  const next = clone(structure)
+  if (calendar === null) {
+    const { calendar: _removed, ...rest } = node
+    next.nodes[nodeId] = rest
+  } else {
+    next.nodes[nodeId] = { ...node, calendar }
+  }
+  return next
+}
+
+export function setTimePicker(
+  structure: ComponentStructure,
+  nodeId: string,
+  timePicker: NodeTimePicker | null,
+): ComponentStructure {
+  const node = structure.nodes[nodeId]
+  if (!node) return structure
+  const next = clone(structure)
+  if (timePicker === null) {
+    const { timePicker: _removed, ...rest } = node
+    next.nodes[nodeId] = rest
+  } else {
+    next.nodes[nodeId] = { ...node, timePicker }
+  }
+  return next
+}
+
+// ─── Per-archetype config surfaces (proposal 0034) ────────────────────────────
+
+// Alert severity is a PAINT variant (like GroupRealization): choosing it repaints the
+// alert's fill/border and the icon's ink with the matching semantic status tokens, and
+// records the choice on the root so the Inspector shows it. `info` is the seeded default
+// so it clears the field.
+const ALERT_SEVERITY_ROOT: Record<AlertSeverity, Record<string, string>> = {
+  info: { fill: 'info-subtle', 'border.color': 'info' },
+  success: { fill: 'success-subtle', 'border.color': 'success' },
+  warning: { fill: 'warning-subtle', 'border.color': 'warning' },
+  danger: { fill: 'danger-subtle', 'border.color': 'danger' },
+}
+const ALERT_SEVERITY_ICON: Record<AlertSeverity, string> = {
+  info: 'info',
+  success: 'success',
+  warning: 'warning',
+  danger: 'danger',
+}
+const leafOf = (n: ComponentNode): string | undefined => n.part?.split('.').pop()
+
+export function setAlertSeverity(
+  structure: ComponentStructure,
+  rootId: string,
+  severity: AlertSeverity | null,
+): ComponentStructure {
+  const root = structure.nodes[rootId]
+  if (!root) return structure
+  const eff: AlertSeverity = severity ?? 'info'
+  const next = clone(structure)
+  const rootFacets = ALERT_SEVERITY_ROOT[eff]
+  next.nodes[rootId] = {
+    ...next.nodes[rootId],
+    facets: { ...next.nodes[rootId].facets, ...rootFacets },
+    ...(severity && severity !== 'info' ? { severity } : {}),
+  }
+  if (!severity || severity === 'info') delete next.nodes[rootId].severity
+  for (const n of Object.values(next.nodes)) {
+    if (leafOf(n) === 'icon') n.facets = { ...n.facets, ink: ALERT_SEVERITY_ICON[eff] }
+  }
+  return next
+}
+
+// The remaining surfaces are plain config objects stored on the node (same shape as
+// setCalendar/setTimePicker): the generated component reads them; a null clears.
+function setNodeField<K extends keyof ComponentNode>(
+  structure: ComponentStructure,
+  nodeId: string,
+  key: K,
+  value: ComponentNode[K] | null,
+): ComponentStructure {
+  const node = structure.nodes[nodeId]
+  if (!node) return structure
+  const next = clone(structure)
+  if (value === null) {
+    const rest = { ...next.nodes[nodeId] }
+    delete rest[key]
+    next.nodes[nodeId] = rest
+  } else {
+    next.nodes[nodeId] = { ...next.nodes[nodeId], [key]: value }
+  }
+  return next
+}
+
+export const setAccordionMode = (s: ComponentStructure, id: string, v: AccordionMode | null) =>
+  setNodeField(s, id, 'accordion', v)
+export const setTabs = (s: ComponentStructure, id: string, v: NodeTabs | null) =>
+  setNodeField(s, id, 'tabs', v)
+export const setSlider = (s: ComponentStructure, id: string, v: NodeSlider | null) =>
+  setNodeField(s, id, 'slider', v)
+export const setRating = (s: ComponentStructure, id: string, v: NodeRating | null) =>
+  setNodeField(s, id, 'rating', v)
+export const setColorPickerConfig = (s: ComponentStructure, id: string, v: NodeColorPicker | null) =>
+  setNodeField(s, id, 'colorPicker', v)
+export const setOverlay = (s: ComponentStructure, id: string, v: NodeOverlay | null) =>
+  setNodeField(s, id, 'overlay', v)
+
+// Conditional presence (0031, predicate in 0032). A null/unconditional predicate removes
+// the field entirely (node reverts to always-present), mirroring setNodeMotion's empty case.
+export function setNodePresence(
+  structure: ComponentStructure,
+  nodeId: string,
+  presence: Predicate | null,
+): ComponentStructure {
+  const node = structure.nodes[nodeId]
+  if (!node) return structure
+  const next = clone(structure)
+  if (!presence || isUnconditional(presence)) {
+    const { presence: _removed, ...rest } = node
+    next.nodes[nodeId] = rest
+  } else {
+    next.nodes[nodeId] = { ...node, presence }
   }
   return next
 }

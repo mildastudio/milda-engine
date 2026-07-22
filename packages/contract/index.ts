@@ -1,5 +1,5 @@
 export { buildDigest } from './digest'
-export type { ContractDigest, ComponentDigest, PropDigest, SlotDigest } from './digest'
+export type { ContractDigest, ComponentDigest, PropDigest, EventDigest, SlotDigest } from './digest'
 export { diffDigests, bumpVersion } from './diff'
 export type { DiffResult, Change, ChangeKind, Severity } from './diff'
 export { canonicalType, typesEqual } from './variance'

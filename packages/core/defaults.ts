@@ -1,8 +1,9 @@
-import type { ComponentNode, ComponentStructure } from './structure/types'
+import type { ComponentNode, ComponentStructure, StateRule } from './structure/types'
 
 interface PartPaint {
   facets?: Record<string, string>
   layout?: Record<string, string>
+  states?: StateRule[]
 }
 
 interface ArchetypePaint {
@@ -10,9 +11,24 @@ interface ArchetypePaint {
   parts?: Record<string, PartPaint>
 }
 
+// Small seed-time state-rule builders (a self-contained counterpart to the
+// example library's `onHover`/`onSelected` helpers — this package doesn't depend
+// on that one). Interaction feedback a born control needs to read as ALIVE
+// (hover, picked) without any author styling — replacing what used to be faked
+// globally in the editor's fallback stylesheet.
+const stateRule = (states: StateRule['states'], facets: Record<string, string>): StateRule => ({
+  id: crypto.randomUUID(),
+  props: {},
+  states,
+  facets,
+})
+const onHover = (facets: Record<string, string>): StateRule => stateRule(['hovered'], facets)
+const onSelected = (facets: Record<string, string>): StateRule => stateRule(['selected'], facets)
+
 const accentButton: PartPaint = {
   facets: { fill: 'accent', corner: 'md', inset: 'sm', gap: 'sm' },
   layout: { direction: 'row', align: 'center', distribute: 'center' },
+  states: [onHover({ fill: 'accent-hover' })],
 }
 const outlineButton: PartPaint = {
   facets: {
@@ -25,6 +41,7 @@ const outlineButton: PartPaint = {
     'border.color': 'border',
   },
   layout: { direction: 'row', align: 'center', distribute: 'center' },
+  states: [onHover({ fill: 'surface-sunken' })],
 }
 const inputBox: PartPaint = {
   facets: {
@@ -37,6 +54,13 @@ const inputBox: PartPaint = {
     'border.color': 'border',
   },
   layout: { direction: 'row', align: 'center' },
+  states: [onHover({ 'border.color': 'border-strong' })],
+}
+
+const smallIconButton: PartPaint = {
+  facets: { ink: 'text-muted', corner: 'sm', inset: 'xs' },
+  layout: { direction: 'row', align: 'center', distribute: 'center' },
+  states: [onHover({ fill: 'surface-sunken' })],
 }
 
 const overlaySurface: PartPaint = {
@@ -50,12 +74,17 @@ const overlaySurface: PartPaint = {
     'border.width': 'hairline',
     'border.color': 'border',
   },
-  layout: { direction: 'column' },
+  // A born popup surface needs SOME width to read as a real menu/listbox rather
+  // than a content-hugging sliver — the interactive preview overrides this to
+  // match the trigger (surfacePositionDecls' `minWidth:100%`); this is the design-
+  // canvas (and pre-interaction) fallback.
+  layout: { direction: 'column', width: 'md' },
 }
 
 const menuItem: PartPaint = {
   facets: { ink: 'text', corner: 'sm', inset: 'sm', gap: 'sm' },
   layout: { direction: 'row', align: 'center' },
+  states: [onHover({ fill: 'surface-sunken' })],
 }
 
 const DEFAULTS: Record<string, ArchetypePaint> = {
@@ -63,6 +92,7 @@ const DEFAULTS: Record<string, ArchetypePaint> = {
     root: {
       facets: { fill: 'accent', corner: 'md', insetX: 'lg', insetY: '6px' },
       layout: { direction: 'row', align: 'center', distribute: 'center' },
+      states: [onHover({ fill: 'accent-hover' })],
     },
 
     parts: {
@@ -211,13 +241,13 @@ const DEFAULTS: Record<string, ArchetypePaint> = {
     },
   },
   Slider: {
-    root: { facets: { gap: 'sm' }, layout: { direction: 'row', align: 'center' } },
+    root: { facets: { gap: 'sm' }, layout: { direction: 'row', align: 'center', width: 'md' } },
     parts: {
       track: {
         facets: { fill: 'surface-sunken', corner: 'pill' },
-        layout: { direction: 'row', align: 'center' },
+        layout: { direction: 'row', align: 'center', width: 'fill', height: '6px' },
       },
-      range: { facets: { fill: 'accent', corner: 'pill' } },
+      range: { facets: { fill: 'accent', corner: 'pill' }, layout: { width: '50%', height: 'fill' } },
       thumb: {
         facets: {
           fill: 'surface',
@@ -226,6 +256,7 @@ const DEFAULTS: Record<string, ArchetypePaint> = {
           'border.width': 'hairline',
           'border.color': 'border',
         },
+        layout: { width: '16px', height: '16px' },
       },
       value: { facets: { ink: 'text-muted', 'text.size': 'sm' } },
     },
@@ -251,6 +282,110 @@ const DEFAULTS: Record<string, ArchetypePaint> = {
       },
       control: { facets: { ink: 'text', 'text.size': 'md', inset: 'sm' } },
       icon: { facets: { ink: 'text' } },
+    },
+  },
+  DatePicker: {
+    parts: {
+      trigger: {
+        ...inputBox,
+        layout: { direction: 'row', align: 'center', distribute: 'between', width: 'sm' },
+      },
+      value: { facets: { ink: 'text', 'text.size': 'md' } },
+      icon: { facets: { ink: 'text-muted' } },
+      surface: {
+        ...overlaySurface,
+        facets: { ...overlaySurface.facets, inset: 'sm', gap: 'sm' },
+      },
+      header: {
+        facets: { gap: 'sm' },
+        layout: { direction: 'row', align: 'center', distribute: 'between' },
+      },
+      prev: smallIconButton,
+      next: smallIconButton,
+      title: { facets: { ink: 'text', 'text.size': 'sm', 'text.weight': 'semibold' } },
+      grid: { facets: { gap: 'xs' }, layout: { direction: 'row', wrap: 'wrap' } },
+      day: {
+        facets: { ink: 'text', corner: 'sm', inset: 'xs', 'text.size': 'sm' },
+        layout: { direction: 'row', align: 'center', distribute: 'center' },
+      },
+      label: { facets: { ink: 'text', 'text.size': 'sm' } },
+    },
+  },
+  TimePicker: {
+    parts: {
+      trigger: {
+        ...inputBox,
+        layout: { direction: 'row', align: 'center', distribute: 'between', width: 'sm' },
+      },
+      value: { facets: { ink: 'text', 'text.size': 'md' } },
+      icon: { facets: { ink: 'text-muted' } },
+      surface: { ...overlaySurface, layout: { ...overlaySurface.layout, direction: 'row' } },
+      column: { facets: { gap: 'xs' }, layout: { direction: 'column' } },
+      option: menuItem,
+      label: { facets: { ink: 'text', 'text.size': 'md' } },
+    },
+  },
+  ColorPicker: {
+    parts: {
+      trigger: {
+        ...inputBox,
+        layout: { direction: 'row', align: 'center', distribute: 'between', width: 'sm' },
+      },
+      swatch: {
+        facets: { fill: 'accent', corner: 'sm' },
+        layout: { width: '16px', height: '16px' },
+      },
+      value: { facets: { ink: 'text', 'text.size': 'md' } },
+      surface: { ...overlaySurface, facets: { ...overlaySurface.facets, inset: 'sm', gap: 'sm' } },
+      area: { facets: { fill: 'surface-sunken', corner: 'md' }, layout: { height: '120px' } },
+      hue: { facets: { fill: 'surface-sunken', corner: 'pill' }, layout: { height: '12px' } },
+      input: {
+        facets: {
+          fill: 'surface',
+          ink: 'text',
+          corner: 'sm',
+          inset: 'xs',
+          'text.size': 'sm',
+          'border.width': 'hairline',
+          'border.color': 'border',
+        },
+      },
+    },
+  },
+  FileUpload: {
+    root: { facets: { gap: 'sm' }, layout: { direction: 'column' } },
+    parts: {
+      dropzone: {
+        facets: {
+          fill: 'surface',
+          corner: 'md',
+          inset: 'xl',
+          gap: 'sm',
+          'border.width': 'thin',
+          'border.color': 'border',
+        },
+        layout: { direction: 'column', align: 'center', distribute: 'center' },
+      },
+      icon: { facets: { ink: 'text-muted' } },
+      label: { facets: { ink: 'text-muted', 'text.size': 'sm' } },
+      list: { facets: { gap: 'xs' }, layout: { direction: 'column' } },
+      item: {
+        facets: { gap: 'sm', inset: 'xs', corner: 'sm' },
+        layout: { direction: 'row', align: 'center', distribute: 'between' },
+      },
+      name: { facets: { ink: 'text', 'text.size': 'sm' } },
+      remove: smallIconButton,
+    },
+  },
+  Rating: {
+    root: { facets: { gap: 'xs' }, layout: { direction: 'row', align: 'center' } },
+    parts: {
+      item: {
+        facets: { corner: 'sm' },
+        layout: { direction: 'row', align: 'center' },
+        states: [onHover({ fill: 'surface-sunken' })],
+      },
+      icon: { facets: { ink: 'text-muted' }, states: [onSelected({ ink: 'accent' })] },
     },
   },
   TagsInput: {
@@ -340,8 +475,15 @@ const DEFAULTS: Record<string, ArchetypePaint> = {
         layout: { direction: 'row', align: 'center' },
       },
       tab: {
-        facets: { ink: 'text-muted', inset: 'sm', gap: 'sm' },
+        facets: {
+          ink: 'text-muted',
+          inset: 'sm',
+          gap: 'sm',
+          'border.width': 'hairline',
+          'border.color': 'transparent',
+        },
         layout: { direction: 'row', align: 'center', distribute: 'center' },
+        states: [onHover({ ink: 'text' }), onSelected({ ink: 'accent', 'border.color': 'accent' })],
       },
       label: { facets: { ink: 'text', 'text.size': 'md', 'text.weight': 'medium' } },
       panel: { facets: { ink: 'text', inset: 'sm' }, layout: { direction: 'column' } },
@@ -396,12 +538,17 @@ const DEFAULTS: Record<string, ArchetypePaint> = {
           'border.width': 'hairline',
           'border.color': 'border',
         },
-        layout: { direction: 'column' },
+        layout: { direction: 'column', width: 'md' },
       },
       content: { facets: { ink: 'text', 'text.size': 'md' }, layout: { direction: 'column' } },
     },
   },
   Tooltip: {
+    // The trigger wraps WHATEVER the consumer hovers/focuses — a real button, a
+    // piece of text, an icon. It carries no chrome of its own (that would fight
+    // the wrapped content's own look); it's a default content slot instead (see
+    // PART_OVERRIDES in seed.ts), with a design-time sample so a born tooltip
+    // still reads as anchored to something rather than a blank spot.
     parts: {
       surface: {
         facets: { fill: 'text', ink: 'surface', corner: 'sm', inset: 'xs', elevation: 'md' },
@@ -410,6 +557,18 @@ const DEFAULTS: Record<string, ArchetypePaint> = {
     },
   },
   ContextMenu: {
+    // The root IS the context region (right-click / long-press target) — give it a
+    // visible area so the born component can actually be invoked and styled.
+    root: {
+      facets: {
+        fill: 'surface',
+        corner: 'md',
+        inset: 'xl',
+        'border.width': 'hairline',
+        'border.color': 'border',
+      },
+      layout: { direction: 'row', align: 'center', distribute: 'center' },
+    },
     parts: {
       surface: overlaySurface,
       item: menuItem,
@@ -418,6 +577,28 @@ const DEFAULTS: Record<string, ArchetypePaint> = {
     },
   },
 
+  Tree: {
+    root: { layout: { direction: 'column' } },
+    parts: {
+      item: {
+        facets: { corner: 'sm', inset: 'xs', gap: 'sm' },
+        layout: { direction: 'row', align: 'center' },
+      },
+      indicator: { facets: { ink: 'text-muted' } },
+      label: { facets: { ink: 'text', 'text.size': 'md' } },
+    },
+  },
+  Wizard: {
+    root: { facets: { gap: 'lg' }, layout: { direction: 'column' } },
+    parts: {
+      step: { facets: { gap: 'sm' }, layout: { direction: 'row', align: 'center' } },
+      indicator: { facets: { ink: 'text-muted' } },
+      label: { facets: { ink: 'text', 'text.size': 'sm', 'text.weight': 'medium' } },
+      content: { facets: { gap: 'md' }, layout: { direction: 'column' } },
+      back: outlineButton,
+      next: accentButton,
+    },
+  },
   Breadcrumbs: {
     root: { facets: { gap: 'xs' }, layout: { direction: 'row', align: 'center' } },
     parts: {
@@ -497,8 +678,9 @@ const DEFAULTS: Record<string, ArchetypePaint> = {
     },
     parts: {
       item: {
-        facets: { ink: 'text', inset: 'sm', gap: 'sm' },
+        facets: { ink: 'text', inset: 'sm', gap: 'sm', corner: 'sm' },
         layout: { direction: 'row', align: 'center' },
+        states: [onHover({ fill: 'surface-sunken' }), onSelected({ fill: 'accent-subtle' })],
       },
       content: { facets: { ink: 'text' }, layout: { direction: 'row', align: 'center' } },
     },
@@ -546,6 +728,25 @@ const DEFAULTS: Record<string, ArchetypePaint> = {
     },
   },
 
+  Carousel: {
+    root: { facets: { gap: 'sm' }, layout: { direction: 'row', align: 'center' } },
+    parts: {
+      viewport: {
+        facets: {
+          fill: 'surface',
+          corner: 'md',
+          inset: 'sm',
+          gap: 'sm',
+          'border.width': 'hairline',
+          'border.color': 'border',
+        },
+        layout: { direction: 'row', align: 'center' },
+      },
+      slide: { facets: { fill: 'surface-sunken', corner: 'md', inset: 'md' } },
+      previous: smallIconButton,
+      next: smallIconButton,
+    },
+  },
   Toast: {
     root: {
       facets: {
@@ -595,6 +796,14 @@ const DEFAULTS: Record<string, ArchetypePaint> = {
       label: { facets: { ink: 'text-muted', 'text.size': 'sm' } },
     },
   },
+  Meter: {
+    root: { facets: { gap: 'xs' }, layout: { direction: 'column' } },
+    parts: {
+      track: { facets: { fill: 'surface-sunken', corner: 'pill' } },
+      indicator: { facets: { fill: 'accent', corner: 'pill' } },
+      label: { facets: { ink: 'text-muted', 'text.size': 'sm' } },
+    },
+  },
   Badge: {
     root: {
       facets: { fill: 'accent', ink: 'on-accent', corner: 'pill', inset: 'xs' },
@@ -623,10 +832,10 @@ const DEFAULTS: Record<string, ArchetypePaint> = {
   Avatar: {
     root: {
       facets: { fill: 'surface-sunken', ink: 'text-muted', corner: 'pill' },
-      layout: { direction: 'row', align: 'center', distribute: 'center' },
+      layout: { direction: 'row', align: 'center', distribute: 'center', width: '40px', height: '40px' },
     },
     parts: {
-      image: { facets: { corner: 'pill' } },
+      image: { facets: { corner: 'pill' }, layout: { width: 'fill', height: 'fill' } },
       fallback: { facets: { ink: 'text-muted', 'text.weight': 'semibold' } },
       badge: {
         facets: {
@@ -635,6 +844,7 @@ const DEFAULTS: Record<string, ArchetypePaint> = {
           'border.width': 'thin',
           'border.color': 'surface',
         },
+        layout: { width: '12px', height: '12px' },
       },
     },
   },
@@ -646,6 +856,9 @@ function paint(node: ComponentNode, p?: PartPaint): void {
   if (!p) return
   if (p.facets) node.facets = { ...p.facets, ...node.facets }
   if (p.layout) node.layout = { ...p.layout, ...node.layout }
+  // A freshly-seeded node never already carries states, so this is additive, not
+  // a merge-with-override — but append (rather than replace) to stay future-proof.
+  if (p.states?.length) node.states = [...p.states, ...(node.states ?? [])]
 }
 
 export function applyArchetypeDefaults(
@@ -653,6 +866,7 @@ export function applyArchetypeDefaults(
   archetype: string | null,
 ): void {
   seedLabelAssociations(structure)
+  seedControlNames(structure)
   const def = archetype ? DEFAULTS[archetype] : undefined
   if (!def) return
   for (const node of Object.values(structure.nodes)) {
@@ -661,6 +875,36 @@ export function applyArchetypeDefaults(
       const leaf = leafOf(node)
       if (leaf) paint(node, def.parts?.[leaf])
     }
+  }
+}
+
+// Icon-only action parts a born component ships unlabeled (a Dialog's ×, a tag's
+// remove, a pager's arrows): give them their conventional accessible name so the
+// seed is ARIA-conform from birth. Pure a11y intent — realized as aria-label on web,
+// an accessibility label on native — never visible content. The author's own
+// name/label always wins (only set when absent), and a control that will contain
+// visible text names itself from its contents instead.
+const CONTROL_PART_NAMES: Record<string, string> = {
+  close: 'Close',
+  clear: 'Clear',
+  remove: 'Remove',
+  previous: 'Previous',
+  prev: 'Previous',
+  next: 'Next',
+  back: 'Back',
+  increment: 'Increase',
+  decrement: 'Decrease',
+}
+
+function seedControlNames(structure: ComponentStructure): void {
+  for (const node of Object.values(structure.nodes)) {
+    if (node.kind !== 'control') continue
+    if (node.a11y?.name || node.a11y?.labelledBy) continue
+    const name = CONTROL_PART_NAMES[leafOf(node) ?? '']
+    if (!name) continue
+    const hasText = node.childrenIds.some((id) => structure.nodes[id]?.kind === 'text')
+    if (hasText) continue
+    node.a11y = { ...node.a11y, name: { kind: 'value', value: name } }
   }
 }
 

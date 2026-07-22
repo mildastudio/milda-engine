@@ -1,24 +1,40 @@
 import type { ComponentIR, PropType, PropField, SharedType, NodeSlot } from '@mildastudio/core'
 import { collectSlots } from '@mildastudio/core'
 
+// The digest stays keyed by NAME — names are the public API surface — but since
+// v2 every member also carries the STABLE editor id it came from. Pairing by id
+// across two digests is what turns a rename into a first-class change instead of
+// a spurious remove+add. Digests recorded before v2 simply lack ids and diff by
+// name (the old behavior).
 export interface ContractDigest {
   components: Record<string, ComponentDigest>
 }
 
 export interface ComponentDigest {
+  id?: string
+
   props: Record<string, PropDigest>
 
-  events: Record<string, { payload: PropType | null }>
+  events: Record<string, EventDigest>
 
   slots: Record<string, SlotDigest>
 }
 
 export interface PropDigest {
+  id?: string
   type: PropType
   required: boolean
 }
 
+export interface EventDigest {
+  id?: string
+  payload: PropType | null
+}
+
 export interface SlotDigest {
+  // The slot node's id — stable across exposeAs renames.
+  id?: string
+
   arity: NodeSlot['arity']
 
   accepts: string
@@ -78,19 +94,22 @@ export function buildDigest(
     const props: Record<string, PropDigest> = {}
     for (const p of component.contract?.props ?? []) {
       props[p.name] = {
+        id: p.id,
         type: resolveType(p.type, sharedTypes, seen),
         required: p.required === true,
       }
     }
-    const events: Record<string, { payload: PropType | null }> = {}
+    const events: Record<string, EventDigest> = {}
     for (const e of component.contract?.events ?? []) {
-      events[e.name] = { payload: e.payload ? resolveType(e.payload, sharedTypes, seen) : null }
+      events[e.name] = { id: e.id, payload: e.payload ? resolveType(e.payload, sharedTypes, seen) : null }
     }
     const slots: Record<string, SlotDigest> = {}
     for (const s of collectSlots(component)) {
-      slots[s.name] = { arity: s.slot.arity, accepts: acceptsLabel(s.slot) }
+      slots[s.name] = { id: s.nodeId, arity: s.slot.arity, accepts: acceptsLabel(s.slot) }
     }
-    out.components[component.name] = { props, events, slots }
+    // ComponentIR itself carries no id; the editor's EditorComponent does. Read
+    // it defensively so bare-IR callers (generators, CLI fixtures) still digest.
+    out.components[component.name] = { id: (component as { id?: string }).id, props, events, slots }
   }
   return out
 }

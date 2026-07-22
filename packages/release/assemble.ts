@@ -1,5 +1,5 @@
 import type { ComponentIR, DocumentFoundations, SharedType } from '@mildastudio/core'
-import { componentName, getTarget, type GeneratedFile } from '@mildastudio/generate'
+import { componentName, componentUsesContext, getTarget, type GeneratedFile } from '@mildastudio/generate'
 import type { PackageSpec, ReleaseConfig, ReleasePlan } from './types'
 
 const PEER_DEPS: Record<string, string> = { react: '>=18', 'react-dom': '>=18' }
@@ -48,6 +48,9 @@ export function assemble(
   const theme = target.theme(foundations, assets)
 
   const iconModule = target.icons(foundations, assets)
+  // Shared context runtime (0032 phase 4), emitted once when any component gates on a context.
+  const contextModule = components.some(componentUsesContext) ? (target.context?.() ?? null) : null
+  const sharedExtra = [iconModule, contextModule].filter((f): f is GeneratedFile => f !== null)
   const root = rootPackageName(config)
 
   const componentsById = Object.fromEntries(
@@ -66,7 +69,7 @@ export function assemble(
     const emittedByComponent = components.map((c) => ({ c, files: target.emit(c, targetOptions) }))
     const emitted = emittedByComponent.flatMap((e) => e.files)
     const publicFiles = emittedByComponent.filter((e) => !e.c.internal).flatMap((e) => e.files)
-    const shared = iconModule ? [iconModule] : []
+    const shared = sharedExtra
     const pkg: PackageSpec = {
       name: root,
       version: config.version,
@@ -94,7 +97,7 @@ export function assemble(
     cssOnly: true,
   }
 
-  const shared = iconModule ? [iconModule] : []
+  const shared = sharedExtra
 
   const componentPkgs: PackageSpec[] = components
     .filter((c) => !c.internal)
