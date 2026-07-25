@@ -4,6 +4,7 @@ export type ScaleName =
   | 'borderWidth'
   | 'fontSize'
   | 'fontWeight'
+  | 'fontFamily'
   | 'lineHeight'
   | 'letterSpacing'
   | 'opacity'
@@ -60,6 +61,11 @@ export const SCALES: Record<ScaleName, ScaleToken[]> = {
     { id: 'medium', name: 'Medium', value: '500' },
     { id: 'semibold', name: 'Semibold', value: '600' },
     { id: 'bold', name: 'Bold', value: '700' },
+  ],
+  fontFamily: [
+    { id: 'sans', name: 'Sans', value: 'system-ui, -apple-system, sans-serif' },
+    { id: 'serif', name: 'Serif', value: 'Georgia, "Times New Roman", serif' },
+    { id: 'mono', name: 'Mono', value: 'ui-monospace, "SF Mono", Menlo, monospace' },
   ],
 
   lineHeight: [

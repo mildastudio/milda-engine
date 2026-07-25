@@ -23,6 +23,8 @@ import type {
   EventDef as IrEventDef,
   Layer as IrLayer,
   NodeKind,
+  NodeOverlay,
+  DismissTrigger,
   Predicate as IrPredicate,
   PredicateRef as IrPredicateRef,
   PropDef as IrPropDef,
@@ -74,7 +76,8 @@ const TYPE_TO_IR: Record<AstTokenType, IrTokenType> = {
   typography: 'textStyle',
   border: 'borderWidth',
   shadow: 'elevation',
-  fontFamily: 'fontSize', // no IR fontFamily token type — fonts live in foundations.fonts
+  fontFamily: 'fontFamily',
+  fontWeight: 'fontWeight',
   blur: 'elevation',
   tonal: 'elevation',
   ring: 'color',
@@ -82,7 +85,7 @@ const TYPE_TO_IR: Record<AstTokenType, IrTokenType> = {
   none: 'elevation',
 }
 
-const IR_LOSSY = new Set<AstTokenType>(['fontFamily', 'blur', 'tonal', 'ring', 'backdrop', 'none'])
+const IR_LOSSY = new Set<AstTokenType>(['blur', 'tonal', 'ring', 'backdrop', 'none'])
 
 // An sRGB/HSL/… ColorValue → a CSS color string for an IR raw slot.
 function colorToCss(c: ColorValue): string {
@@ -127,7 +130,7 @@ function valueToIr(tok: AstToken, issues: string[]): IrTokenValue {
   if (v.kind === 'alias') {
     // AST alias refs (context-id → token-id) → IR byContext slots (context-id → {ref}).
     const slots: Record<string, IrSlot> = {}
-    for (const [ctx, id] of Object.entries(v.refs)) slots[ctx] = { ref: id }
+    for (const [ctx, id] of Object.entries(v.refs)) slots[ctx] = { ref: normId(id) }
     return { kind: 'byContext', by: v.by, slots }
   }
   if (v.kind === 'escape') {
@@ -140,6 +143,9 @@ function valueToIr(tok: AstToken, issues: string[]): IrTokenValue {
   }
   if (raw && typeof raw === 'object' && 'value' in (raw as object) && 'unit' in (raw as object)) {
     return { kind: 'fixed', slot: { raw: dimensionToCss(raw as DimensionValue) } }
+  }
+  if (tok.type === 'fontWeight' && raw && typeof raw === 'object' && 'weight' in (raw as object)) {
+    return { kind: 'fixed', slot: { raw: String((raw as { weight: number }).weight) } }
   }
   if (typeof raw === 'string' || typeof raw === 'number' || typeof raw === 'boolean') {
     return { kind: 'fixed', slot: { raw: String(raw) } }
@@ -166,7 +172,7 @@ export function foundationsToIr(f: AstFoundations): FoundationsToIrResult {
       if (IR_LOSSY.has(t.type)) {
         issues.push(`token "${t.name}": AST type "${t.type}" has no editor scale; mapped to "${irType}"`)
       }
-      return { id: t.id, name: t.name, type: irType, value: valueToIr(t, issues), group: null, order: i }
+      return { id: normId(t.id), name: t.name, type: irType, value: valueToIr(t, issues), group: null, order: i }
     }),
   }))
 
@@ -189,6 +195,13 @@ export function foundationsToIr(f: AstFoundations): FoundationsToIrResult {
 const seg = (s: string) =>
   s.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'x'
 
+// milda token ids are `tok.`-prefixed and dotted (`tok.gray.12`); the editor uses
+// dot-free, hyphenated ids (`gray-12`) that become CSS custom-property names
+// (`--ds-color-gray-12`). Normalize on import so token DEFINITIONS and every REFERENCE
+// (facets, layout, alias slots) agree — otherwise the dotted id both breaks the CSS var
+// name and trips `isRawValue`, emitting the raw `tok.gray.12` string as the value.
+const normId = (id: string): string => id.replace(/^tok\./, '').replace(/\./g, '-')
+
 // AST FacetName → editor facet key. Names with no editor facet (typography axes,
 // state-layer, backdrop) map to null and are dropped with a note.
 const FACET_TO_IR: Record<string, string | null> = {
@@ -200,7 +213,9 @@ const FACET_TO_IR: Record<string, string | null> = {
   opacity: 'opacity',
   ring: 'ring',
   text: 'text.size',
-  border: 'border.color',
+  weight: 'text.weight', // reuses the existing core font-weight facet
+  font: 'font',
+  slant: 'slant',
   textClamp: null,
   textWrap: null,
   overlay: null,
@@ -208,22 +223,22 @@ const FACET_TO_IR: Record<string, string | null> = {
 }
 
 function facetValueToStr(v: FacetValue): string | null {
-  if ('token' in v) return v.token
+  if ('token' in v) return normId(v.token)
   if ('raw' in v) return v.raw
   if ('literal' in v) return String(v.literal)
   return null // inset handled by the caller
 }
 
 function applyInset(inset: InsetValue, out: Record<string, string>): void {
-  if ('all' in inset && inset.all) out.inset = inset.all
+  if ('all' in inset && inset.all) out.inset = normId(inset.all)
   else if ('block' in inset || 'inline' in inset) {
     const i = inset as { block?: string; inline?: string }
-    if (i.block) out.insetY = i.block
-    if (i.inline) out.insetX = i.inline
+    if (i.block) out.insetY = normId(i.block)
+    if (i.inline) out.insetX = normId(i.inline)
   } else {
     const i = inset as { top?: string; left?: string }
-    if (i.top) out.insetY = i.top
-    if (i.left) out.insetX = i.left
+    if (i.top) out.insetY = normId(i.top)
+    if (i.left) out.insetX = normId(i.left)
   }
 }
 
@@ -234,6 +249,15 @@ function facetMapToIr(fm: FacetMap | undefined, issues: string[]): Record<string
     if (!val) continue
     if (name === 'inset' && 'inset' in val) {
       applyInset(val.inset, out)
+      continue
+    }
+    // border (all sides) + per-side borders → split the multi-valued facet into the
+    // editor's flat per-property keys (`border[.side].{color,width,style}`).
+    if ((name === 'border' || name.startsWith('border.')) && 'border' in val) {
+      const b = val.border
+      if (b.color) out[`${name}.color`] = normId(b.color)
+      if (b.width) out[`${name}.width`] = normId(b.width)
+      if (b.style) out[`${name}.style`] = b.style
       continue
     }
     const irKey = FACET_TO_IR[name]
@@ -253,7 +277,7 @@ function axisToStr(axis: NonNullable<LayoutSpec['size']>['width'], issues: strin
   const intent = typeof axis === 'object' && 'intent' in axis ? axis.intent : axis
   if (intent === 'fit' || intent === 'fill') return intent
   if (intent && typeof intent === 'object') {
-    if ('fixed' in intent) return intent.fixed
+    if ('fixed' in intent) return normId(intent.fixed)
     if ('weight' in intent) {
       issues.push('axis weight() has no editor size mode — treated as fill')
       return 'fill'
@@ -277,7 +301,7 @@ function layoutToIr(ls: LayoutSpec, facetsOut: Record<string, string>, issues: s
   if (ls.align) layout.align = ls.align
   if (ls.distribute) layout.distribute = ls.distribute
   if (ls.flow) layout.wrap = 'wrap'
-  if (ls.gap) facetsOut.gap = ls.gap
+  if (ls.gap) facetsOut.gap = normId(ls.gap)
   if (ls.inset) applyInset(ls.inset, facetsOut)
   if (ls.size?.width) {
     const w = axisToStr(ls.size.width, issues)
@@ -458,6 +482,7 @@ export function componentToIr(c: AstComponent): ComponentToIrResult {
       ...(layout && Object.keys(layout).length ? { layout } : {}),
       ...(states.length ? { states } : {}),
       ...(part.presence ? { presence: predicateToIr(part.presence) } : {}),
+      ...(part.slot ? { slot: { arity: part.slot.arity, accepts: part.slot.accepts } } : {}),
     }
     nodes[node.id] = node
   }
@@ -495,6 +520,24 @@ export function componentToIr(c: AstComponent): ComponentToIrResult {
       childrenIds: [],
     }
     issues.push('component has no anatomy — synthesized an empty root node')
+  }
+
+  // Overlay realization (proposal 0034): fold the component's realize dismiss/backdrop
+  // onto the root node's overlay config surface. (The generator doesn't yet consume
+  // node.overlay — dismissability is currently behavior-derived — so this populates the
+  // 0034 config surface and round-trips the intent; generator consumption is separate.)
+  const overlayR = c.realize?.find((r) => r.dismiss !== undefined || r.backdrop !== undefined)
+  if (overlayR && nodes[rootId]) {
+    const overlay: NodeOverlay = {}
+    if (overlayR.dismiss !== undefined) {
+      overlay.dismiss = overlayR.dismiss.filter(
+        (d): d is DismissTrigger => d === 'outside' || d === 'escape' || d === 'closeButton',
+      )
+    }
+    if (overlayR.backdrop === 'none' || overlayR.backdrop === 'scrim' || overlayR.backdrop === 'blur') {
+      overlay.backdrop = overlayR.backdrop
+    }
+    if (Object.keys(overlay).length) nodes[rootId].overlay = overlay
   }
 
   const structure: ComponentStructure = { rootId, nodes }

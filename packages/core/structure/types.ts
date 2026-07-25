@@ -375,12 +375,91 @@ export interface NodeRating {
   allowHalf: boolean
 }
 
-// ColorPicker value representation (proposal 0034). The carrier the picker reads/writes
-// and whether an alpha channel is offered. The exact color TYPE stays a project/publish
-// decision (target options, 0015); this is the picker's own surface config.
+// ColorPicker surface config (proposal 0035). This is the picker's own EDITING UX -
+// which format tabs the user can switch between, the working color space, whether an
+// opacity slider / eyedropper / preset swatches show, and popover-vs-inline layout.
+// It is distinct from the emitted color TYPE, which stays a project/publish decision
+// (target options, 0015 - `colorRepresentation`). The pre-0035 shape had a single
+// `representation` + `alpha`; `normalizeColorPicker` upgrades it.
+
+/** A format the picker can display/edit in. HSB === HSV (Brightness alias). */
+export type ColorFormat = 'hex' | 'rgb' | 'hsl' | 'hsb'
+/** Working color space: sRGB (HSV area) or perceptual OKLCH. */
+export type ColorSpace = 'srgb' | 'oklch'
+
 export interface NodeColorPicker {
-  representation: 'hex' | 'rgb' | 'hsl'
+  /** Format tabs the user can switch between in the input row. */
+  formats?: ColorFormat[]
+  /** The format shown first (must be one of `formats`). */
+  defaultFormat?: ColorFormat
+  /** Working color space; oklch offers a perceptual area + native oklch() output. */
+  colorSpace?: ColorSpace
+  /** Offer an opacity (alpha) slider + alpha in the emitted value. */
+  alpha?: boolean
+  /** Offer an eyedropper (native EyeDropper API, graceful fallback). */
+  eyedropper?: boolean
+  /** Render a preset-swatch row; the preset colors arrive as a runtime `presets` prop. */
+  swatches?: boolean
+  /** popover = trigger + floating surface; inline = surface always visible. */
+  layout?: 'popover' | 'inline'
+  /** @deprecated pre-0035 single-format shape; read via normalizeColorPicker. */
+  representation?: ColorFormat
+}
+
+/** The fully-resolved ColorPicker config with every field present. */
+export interface ResolvedColorPicker {
+  formats: ColorFormat[]
+  defaultFormat: ColorFormat
+  colorSpace: ColorSpace
   alpha: boolean
+  eyedropper: boolean
+  swatches: boolean
+  layout: 'popover' | 'inline'
+}
+
+/** The pre-config default: a hex-only sRGB popover, no alpha/eyedropper/swatches. */
+export const DEFAULT_COLOR_PICKER: ResolvedColorPicker = {
+  formats: ['hex'],
+  defaultFormat: 'hex',
+  colorSpace: 'srgb',
+  alpha: false,
+  eyedropper: false,
+  swatches: false,
+  layout: 'popover',
+}
+
+/** Upgrade any stored (possibly pre-0035) ColorPicker config to the resolved shape. */
+export function normalizeColorPicker(cfg?: NodeColorPicker | null): ResolvedColorPicker {
+  if (!cfg) return { ...DEFAULT_COLOR_PICKER }
+  const legacy = cfg.representation
+  const formats: ColorFormat[] =
+    cfg.formats && cfg.formats.length > 0 ? cfg.formats : legacy ? [legacy] : ['hex']
+  const defaultFormat =
+    cfg.defaultFormat && formats.includes(cfg.defaultFormat) ? cfg.defaultFormat : formats[0]
+  return {
+    formats,
+    defaultFormat,
+    colorSpace: cfg.colorSpace ?? 'srgb',
+    alpha: cfg.alpha ?? false,
+    eyedropper: cfg.eyedropper ?? false,
+    swatches: cfg.swatches ?? false,
+    layout: cfg.layout ?? 'popover',
+  }
+}
+
+/** True when a config equals the pre-config default (so the IR can store `null`). */
+export function isDefaultColorPicker(cfg: NodeColorPicker | null | undefined): boolean {
+  const r = normalizeColorPicker(cfg)
+  return (
+    r.formats.length === 1 &&
+    r.formats[0] === 'hex' &&
+    r.defaultFormat === 'hex' &&
+    r.colorSpace === 'srgb' &&
+    !r.alpha &&
+    !r.eyedropper &&
+    !r.swatches &&
+    r.layout === 'popover'
+  )
 }
 
 // Overlay dismissal + placement (proposal 0034) for Dialog/Drawer/Popover. `triggers`
@@ -390,6 +469,8 @@ export type DismissTrigger = 'outside' | 'escape' | 'closeButton'
 export interface NodeOverlay {
   dismiss?: DismissTrigger[]
   placement?: 'top' | 'bottom' | 'left' | 'right' | 'center'
+  // The layer painted behind the overlay content (proposal 0034). `none` = no scrim.
+  backdrop?: 'none' | 'scrim' | 'blur'
 }
 
 export interface ComponentNode {

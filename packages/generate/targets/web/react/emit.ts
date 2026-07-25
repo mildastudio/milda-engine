@@ -61,6 +61,9 @@ import {
   timingTransitionDecl,
   type ControlTransition,
   SR_ONLY_DECLS,
+  normalizeColorPicker,
+  type ResolvedColorPicker,
+  type ColorFormat,
   BUILTIN_COLOR_ID,
   BUILTIN_ICON_NAME_ID,
   BUILTIN_DATE_ID,
@@ -2704,13 +2707,14 @@ function emitTimePicker(component: ComponentIR, options: EmitOptions): string {
   return lines.filter((l) => l !== '').join('\n') + '\n'
 }
 
-// ColorPicker view (proposal 0029) - a thin renderer around the shared color core
-// (targets/behavior/color.ts, vendored beside the component as `./color`): all the
-// HSV/RGB/hex math + area/hue geometry lives there so every framework target computes
-// an identical picker. This wires React state + pointer drag on the saturation/value
-// area and hue slider, and converts between the core's canonical HSV and the project's
-// representation (v1 default: hex) at the boundary. The hex text input is always the
-// universal editable form; the trigger swatch shows the live color.
+// ColorPicker view (proposal 0029/0035) - a thin renderer around the shared color
+// core (targets/behavior/color.ts, vendored beside the component as `./color`): all
+// HSV/RGB/hex + OKLCH math and area/hue/alpha geometry live there, so every framework
+// target computes an identical picker. This wires React state + pointer drag and
+// reads node.colorPicker (0035) for the working space, editable format tabs, opacity,
+// eyedropper, preset swatches, and popover-vs-inline layout. The emitted VALUE TYPE is
+// a separate project/publish decision (options.colorRepresentation, 0015); we convert
+// the canonical working color to it at the boundary.
 function emitColorPicker(component: ComponentIR, options: EmitOptions): string {
   const name = componentName(component)
   const nodes = component.structure.nodes
@@ -2720,97 +2724,293 @@ function emitColorPicker(component: ComponentIR, options: EmitOptions): string {
   const leaf = (n: ComponentNode) => n.part?.split('.').pop()
   const byPart = (p: string) => Object.values(nodes).find((n) => leaf(n) === p)
 
+  const cfg: ResolvedColorPicker = normalizeColorPicker(root.colorPicker)
+  const isOklch = cfg.colorSpace === 'oklch'
+  const withAlpha = cfg.alpha
+  const inline = cfg.layout === 'inline'
+  const formats = cfg.formats
+  const multiFormat = formats.length > 1
   const rep = options.colorRepresentation ?? 'hex'
+
   const triggerNode = byPart('trigger')
-  const swatchNode = byPart('swatch')
+  // Two parts share the leaf `swatch` (trigger.swatch and surface.swatches.swatch);
+  // disambiguate by the full dotted path.
+  const swatchNode = Object.values(nodes).find((n) => leaf(n) === 'swatch' && n.part?.includes('trigger'))
+  const presetNode = Object.values(nodes).find((n) => leaf(n) === 'swatch' && n.part?.includes('swatches'))
   const valueNode = byPart('value')
   const surface = byPart('surface')
   const areaNode = byPart('area')
   const hueNode = byPart('hue')
+  const alphaNode = byPart('alpha')
+  const eyeNode = byPart('eyedropper')
+  const swatchesNode = byPart('swatches')
   const inputNode = byPart('input')
 
   const trigTag = triggerNode ? tagFor(triggerNode) : 'button'
   const surfTag = surface ? tagFor(surface) : 'div'
   const valueTag = valueNode ? tagFor(valueNode) : 'span'
+  const areaTag = areaNode ? tagFor(areaNode) : 'div'
+  const hueTag = hueNode ? tagFor(hueNode) : 'div'
+  const alphaTag = alphaNode ? tagFor(alphaNode) : 'div'
+  // A plain div: the swatch children are <button>s, so a <ul> would be invalid markup.
+  const swatchesTag = 'div'
+  const inputSa = sa(inputNode)
 
-  const rootStyle = styleAttrsFor(root, [...anchorDecls('popover'), ...nodeStyleDecls(root, 'div')])
-  const surfStyle = surface
-    ? styleAttrsFor(surface, [...surfacePositionDecls('popover'), ...SURFACE_BASE, ...nodeStyleDecls(surface, tagFor(surface))])
-    : ''
+  // Space adapter: canonical working form + the core functions to move to/from sRGB.
+  const A = isOklch
+    ? {
+        W: 'OKLCH',
+        build: 'buildOklch',
+        toRgb: 'oklchToRgb',
+        fromRgb: 'rgbToOklch',
+        areaFrom: 'oklchFromArea',
+        def: '{ l: 0.72, c: 0.15, h: 264 }',
+      }
+    : {
+        W: 'HSV',
+        build: 'buildColor',
+        toRgb: 'hsvToRgb',
+        fromRgb: 'rgbToHsv',
+        areaFrom: 'hsvFromArea',
+        def: '{ h: 264, s: 0.63, v: 0.96 }',
+      }
 
-  // Representation: HSV is canonical inside; serialize/deserialize convert at the boundary.
-  const REP: Record<string, { type: string; imports: string[]; serialize: string; deserialize: string }> = {
-    hex: { type: 'string', imports: ['hsvToHex', 'hexToHsv'], serialize: 'hsvToHex(c)', deserialize: 'v ? hexToHsv(v) : null' },
-    rgb: {
-      type: '{ r: number; g: number; b: number }',
-      imports: ['hsvToRgb', 'rgbToHsv'],
-      serialize: 'hsvToRgb(c)',
-      deserialize: 'v ? rgbToHsv(v) : null',
-    },
-    hsl: {
-      type: '{ h: number; s: number; l: number }',
-      imports: ['hsvToRgb', 'rgbToHsv', 'rgbToHsl', 'hslToRgb'],
-      serialize: 'rgbToHsl(hsvToRgb(c))',
-      deserialize: 'v ? rgbToHsv(hslToRgb(v)) : null',
-    },
+  // Emitted value TYPE (project/publish choice), optionally carrying alpha.
+  const repType =
+    rep === 'rgb'
+      ? withAlpha
+        ? '{ r: number; g: number; b: number; a: number }'
+        : '{ r: number; g: number; b: number }'
+      : rep === 'hsl'
+        ? withAlpha
+          ? '{ h: number; s: number; l: number; a: number }'
+          : '{ h: number; s: number; l: number }'
+        : 'string'
+
+  // Build the import set from what the generated body actually calls (no unused imports).
+  const hasHexFormat = formats.includes('hex')
+  const hasHslFormat = formats.includes('hsl')
+  const hasHsbFormat = formats.includes('hsb')
+  const imports = new Set<string>([A.build, A.areaFrom, 'hueFromTrack', A.toRgb, A.fromRgb])
+  if (rep === 'hex' || hasHexFormat || cfg.eyedropper) imports.add('hexToRgba')
+  if (rep === 'hex' && !withAlpha) imports.add('rgbToHex')
+  if ((rep === 'hex' && withAlpha) || (withAlpha && hasHexFormat)) imports.add('rgbaToHex8')
+  if (rep === 'hsl' || hasHslFormat) {
+    imports.add('rgbToHsl')
+    imports.add('hslToRgb')
   }
-  const repDef = REP[rep]
-  // hexToHsv drives the always-present hex text input; buildColor/hsvFromArea/hueFromTrack the geometry.
-  const coreImports = Array.from(new Set(['buildColor', 'hsvFromArea', 'hueFromTrack', 'hexToHsv', ...repDef.imports])).sort()
+  if (hasHsbFormat) {
+    imports.add('rgbToHsv')
+    imports.add('hsvToRgb')
+  }
+  if (withAlpha) imports.add('alphaFromTrack')
+  const coreImports = Array.from(imports).sort()
 
-  const areaBg =
-    "'linear-gradient(to top, #000, rgba(0,0,0,0)), linear-gradient(to right, #fff, ' + model.hueCss + ')'"
-  const hueBg = "'linear-gradient(to right, #f00, #ff0, #0f0, #0ff, #00f, #f0f, #f00)'"
+  // serialize / deserialize between the working color (+alpha) and the emitted value.
+  const serializeBody =
+    rep === 'hex'
+      ? withAlpha
+        ? `rgbaToHex8(${A.toRgb}(c), a)`
+        : `rgbToHex(${A.toRgb}(c))`
+      : rep === 'rgb'
+        ? withAlpha
+          ? `{ ...${A.toRgb}(c), a }`
+          : `${A.toRgb}(c)`
+        : withAlpha
+          ? `{ ...rgbToHsl(${A.toRgb}(c)), a }`
+          : `rgbToHsl(${A.toRgb}(c))`
+  const deserializeBody =
+    rep === 'hex'
+      ? `const p = hexToRgba(v); return p ? { c: ${A.fromRgb}(p.rgb), a: p.a } : null`
+      : rep === 'rgb'
+        ? `return { c: ${A.fromRgb}(v), a: ${withAlpha ? 'v.a ?? 1' : '1'} }`
+        : `return { c: ${A.fromRgb}(hslToRgb(v)), a: ${withAlpha ? 'v.a ?? 1' : '1'} }`
+
+  // Backgrounds for the area + hue track (native oklch() gradients in OKLCH mode).
+  const areaBg = isOklch
+    ? "'linear-gradient(to top, oklch(0% 0 0), transparent, oklch(100% 0 0)), linear-gradient(to right, oklch(72% 0 ' + Math.round(model.oklch.h) + '), ' + model.hueCss + ')'"
+    : "'linear-gradient(to top, #000, rgba(0,0,0,0)), linear-gradient(to right, #fff, ' + model.hueCss + ')'"
+  const hueBg = isOklch
+    ? "'linear-gradient(to right, oklch(70% 0.2 0), oklch(70% 0.2 60), oklch(70% 0.2 120), oklch(70% 0.2 180), oklch(70% 0.2 240), oklch(70% 0.2 300), oklch(70% 0.2 360))'"
+    : "'linear-gradient(to right, #f00, #ff0, #0f0, #0ff, #00f, #f0f, #f00)'"
+
+  const commitCall = (expr: string) => `commit(${expr}${withAlpha ? ', alpha' : ''})`
+
+  // --- format input rows -------------------------------------------------------
+  const num = (label: string, min: number, max: number, valueExpr: string, setExpr: string) =>
+    `                <input${inputSa} type="number" min={${min}} max={${max}} value={${valueExpr}} aria-label="${label}" onChange={(e) => { const n = Number(e.target.value); if (!Number.isNaN(n)) ${setExpr} }} style={{ width: '3.25rem', textAlign: 'center' }} />`
+  const alphaInput = `                <input${inputSa} type="number" min={0} max={100} value={Math.round(alpha * 100)} aria-label="Alpha %" onChange={(e) => { const n = Number(e.target.value); if (!Number.isNaN(n)) commit(c, Math.min(1, Math.max(0, n / 100))) }} style={{ width: '3.25rem', textAlign: 'center' }} />`
+
+  function formatRow(fmt: ColorFormat): string {
+    if (fmt === 'hex') {
+      const val = withAlpha ? 'rgbaToHex8(model.rgb, alpha)' : 'model.hex'
+      return `                <input${inputSa} type="text" value={${val}} aria-label="Hex color" spellCheck={false} onChange={(e) => { const p = hexToRgba(e.target.value); if (p) ${commitCall(`${A.fromRgb}(p.rgb)`)} }} style={{ flex: 1, minWidth: 0 }} />`
+    }
+    if (fmt === 'rgb') {
+      const rows = [
+        num('Red', 0, 255, 'model.rgb.r', commitCall(`${A.fromRgb}({ ...model.rgb, r: n })`)),
+        num('Green', 0, 255, 'model.rgb.g', commitCall(`${A.fromRgb}({ ...model.rgb, g: n })`)),
+        num('Blue', 0, 255, 'model.rgb.b', commitCall(`${A.fromRgb}({ ...model.rgb, b: n })`)),
+      ]
+      if (withAlpha) rows.push(alphaInput)
+      return rows.join('\n')
+    }
+    if (fmt === 'hsl') {
+      const rows = [
+        num('Hue', 0, 360, 'Math.round(hsl.h)', commitCall(`${A.fromRgb}(hslToRgb({ ...hsl, h: n }))`)),
+        num('Saturation', 0, 100, 'Math.round(hsl.s * 100)', commitCall(`${A.fromRgb}(hslToRgb({ ...hsl, s: n / 100 }))`)),
+        num('Lightness', 0, 100, 'Math.round(hsl.l * 100)', commitCall(`${A.fromRgb}(hslToRgb({ ...hsl, l: n / 100 }))`)),
+      ]
+      if (withAlpha) rows.push(alphaInput)
+      return rows.join('\n')
+    }
+    // hsb (=== HSV channels)
+    const rows = [
+      num('Hue', 0, 360, 'Math.round(hsb.h)', commitCall(`${A.fromRgb}(hsvToRgb({ ...hsb, h: n }))`)),
+      num('Saturation', 0, 100, 'Math.round(hsb.s * 100)', commitCall(`${A.fromRgb}(hsvToRgb({ ...hsb, s: n / 100 }))`)),
+      num('Brightness', 0, 100, 'Math.round(hsb.v * 100)', commitCall(`${A.fromRgb}(hsvToRgb({ ...hsb, v: n / 100 }))`)),
+    ]
+    if (withAlpha) rows.push(alphaInput)
+    return rows.join('\n')
+  }
+
+  const inputBlockLines: string[] = []
+  for (const fmt of formats) {
+    const body = formatRow(fmt)
+    if (multiFormat) {
+      inputBlockLines.push(`            {format === '${fmt}' && (`)
+      inputBlockLines.push(`              <div style={{ display: 'flex', gap: '4px' }}>`)
+      inputBlockLines.push(body)
+      inputBlockLines.push(`              </div>`)
+      inputBlockLines.push(`            )}`)
+    } else {
+      inputBlockLines.push(`            <div style={{ display: 'flex', gap: '4px' }}>`)
+      inputBlockLines.push(body)
+      inputBlockLines.push(`            </div>`)
+    }
+  }
+
+  const formatTabsLines = multiFormat
+    ? [
+        `            <div role="tablist" aria-label="Color format" style={{ display: 'flex', gap: '2px', marginBottom: '6px' }}>`,
+        `              {(${JSON.stringify(formats)} as Format[]).map((f) => (`,
+        `                <button key={f} type="button" role="tab" aria-selected={format === f} onClick={() => setFormat(f)} style={{ flex: 1, padding: '2px 4px', fontSize: '0.6875rem', textTransform: 'uppercase', cursor: 'pointer', background: format === f ? 'var(--ds-color-surface-sunken)' : 'transparent', border: 0, borderRadius: '4px' }}>{f}</button>`,
+        `              ))}`,
+        `            </div>`,
+      ]
+    : []
+
+  // --- assemble the panel (area, hue, [alpha], format tabs+inputs, [eyedropper], [swatches]) ---
+  const panel: string[] = []
+  panel.push(
+    `          <${areaTag}${sa(areaNode)} onPointerDown={dragArea} style={{ position: 'relative', width: '100%', height: '9rem', borderRadius: '6px', touchAction: 'none', cursor: 'crosshair', background: ${areaBg} }}>`,
+    `            <span aria-hidden style={{ position: 'absolute', left: (model.area.x * 100) + '%', top: (model.area.y * 100) + '%', width: '12px', height: '12px', transform: 'translate(-50%, -50%)', borderRadius: '50%', border: '2px solid #fff', boxShadow: '0 0 0 1px rgba(0,0,0,0.4)' }} />`,
+    `          </${areaTag}>`,
+    `          <${hueTag}${sa(hueNode)} onPointerDown={dragHue} style={{ position: 'relative', width: '100%', height: '0.75rem', marginTop: '0.5rem', borderRadius: '999px', touchAction: 'none', cursor: 'ew-resize', background: ${hueBg} }}>`,
+    `            <span aria-hidden style={{ position: 'absolute', left: (model.hueX * 100) + '%', top: '50%', width: '14px', height: '14px', transform: 'translate(-50%, -50%)', borderRadius: '50%', border: '2px solid #fff', boxShadow: '0 0 0 1px rgba(0,0,0,0.4)', background: model.hueCss }} />`,
+    `          </${hueTag}>`,
+  )
+  if (withAlpha) {
+    panel.push(
+      `          <${alphaTag}${sa(alphaNode)} onPointerDown={dragAlpha} style={{ position: 'relative', width: '100%', height: '0.75rem', marginTop: '0.5rem', borderRadius: '999px', touchAction: 'none', cursor: 'ew-resize', backgroundImage: 'linear-gradient(to right, transparent, ' + model.hex + '), repeating-conic-gradient(#c8c8c8 0% 25%, #fff 0% 50%)', backgroundSize: 'auto, 10px 10px' }}>`,
+      `            <span aria-hidden style={{ position: 'absolute', left: (alpha * 100) + '%', top: '50%', width: '14px', height: '14px', transform: 'translate(-50%, -50%)', borderRadius: '50%', border: '2px solid #fff', boxShadow: '0 0 0 1px rgba(0,0,0,0.4)' }} />`,
+      `          </${alphaTag}>`,
+    )
+  }
+  // format tabs + input row(s), with an optional eyedropper button on the same line
+  panel.push(`          <div style={{ marginTop: '0.5rem' }}>`)
+  panel.push(...formatTabsLines)
+  panel.push(`            <div style={{ display: 'flex', gap: '4px', alignItems: 'center' }}>`)
+  panel.push(`              <div style={{ flex: 1, minWidth: 0 }}>`)
+  panel.push(...inputBlockLines.map((l) => '  ' + l))
+  panel.push(`              </div>`)
+  if (cfg.eyedropper) {
+    panel.push(
+      `              <button type="button"${sa(eyeNode)} aria-label="Pick color from screen" onClick={pickEyedropper} style={{ flexShrink: 0, cursor: 'pointer' }}>`,
+      `                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden><path d="m2 22 1-1h3l9-9" /><path d="M3 21v-3l9-9" /><path d="m15 6 3.4-3.4a2.1 2.1 0 1 1 3 3L21 6l-2-2Z" /></svg>`,
+      `              </button>`,
+    )
+  }
+  panel.push(`            </div>`)
+  panel.push(`          </div>`)
+  if (cfg.swatches) {
+    panel.push(
+      `          {presets && presets.length > 0 && (`,
+      `            <${swatchesTag}${sa(swatchesNode)}>`,
+      `              {presets.map((p, i) => {`,
+      `                const d = deserialize(p)`,
+      `                return <button key={i} type="button"${sa(presetNode)} aria-label={'Preset ' + (i + 1)} onClick={() => { if (d) commit(d.c${withAlpha ? ', d.a' : ''}) }} style={{ cursor: 'pointer', background: d ? ${A.build}(d.c).hex : 'transparent' }} />`,
+      `              })}`,
+      `            </${swatchesTag}>`,
+      `          )}`,
+    )
+  }
+
+  // pre-render derived views used by the format inputs
+  const derived: string[] = []
+  if (hasHslFormat) derived.push(`  const hsl = rgbToHsl(model.rgb)`)
+  if (hasHsbFormat) derived.push(`  const hsb = rgbToHsv(model.rgb)`)
 
   const lines: string[] = [
     `'use client'`,
     ``,
-    `import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'`,
-    `import { ${coreImports.join(', ')}, type HSV } from '${
+    `import { useEffect, ${inline ? '' : 'useRef, '}useState, type PointerEvent as ReactPointerEvent } from 'react'`,
+    `import { ${coreImports.join(', ')}, type ${A.W} } from '${
       options.behaviorDelivery === 'package' ? options.behaviorPackage || BEHAVIOR_PACKAGE_DEFAULT : './color'
     }'`,
     ...stylesImport(name),
     ``,
-    `// Color-value representation: ${rep}. The core works in canonical HSV.`,
-    `type ColorValue = ${repDef.type}`,
-    `const serialize = (c: HSV): ColorValue => ${repDef.serialize}`,
-    `const deserialize = (v?: ColorValue | null): HSV | null => ${repDef.deserialize}`,
+    `type Working = ${A.W}`,
+    multiFormat ? `type Format = ${formats.map((f) => `'${f}'`).join(' | ')}` : ``,
+    `// Emitted value: ${rep}${withAlpha ? ' + alpha' : ''}. The core works in canonical ${A.W}.`,
+    `export type ColorValue = ${repType}`,
+    `const serialize = (c: Working, ${withAlpha ? 'a' : '_a'}: number): ColorValue => ${serializeBody.startsWith('{') ? `(${serializeBody})` : serializeBody}`,
+    `const deserialize = (v?: ColorValue | null): { c: Working; a: number } | null => { if (v == null) return null; ${deserializeBody} }`,
     ``,
     `export interface ${name}Props {`,
     `  value?: ColorValue | null`,
     `  defaultValue?: ColorValue | null`,
     `  onValueChange?: (value: ColorValue) => void`,
+    ...(cfg.swatches ? [`  /** Preset colors shown as clickable swatches. */`, `  presets?: ColorValue[]`] : []),
     `}`,
     ``,
-    `export function ${name}({ value: valueProp, defaultValue, onValueChange }: ${name}Props) {`,
-    `  const [open, setOpen] = useState(false)`,
+    `export function ${name}({ value: valueProp, defaultValue, onValueChange${cfg.swatches ? ', presets' : ''} }: ${name}Props) {`,
+    ...(inline ? [] : [`  const [open, setOpen] = useState(false)`]),
     `  const [internal, setInternal] = useState<ColorValue | null | undefined>(defaultValue)`,
     `  const value = valueProp !== undefined ? valueProp : internal`,
-    `  const [hsv, setHsv] = useState<HSV>(() => deserialize(value) ?? { h: 0, s: 1, v: 1 })`,
-    `  const ref = useRef<HTMLDivElement>(null)`,
-    `  const model = buildColor(hsv)`,
+    `  const _init = deserialize(value)`,
+    `  const [c, setC] = useState<Working>(() => _init?.c ?? ${A.def})`,
+    ...(withAlpha ? [`  const [alpha, setAlpha] = useState<number>(() => _init?.a ?? 1)`] : []),
+    ...(multiFormat ? [`  const [format, setFormat] = useState<Format>('${cfg.defaultFormat}')`] : []),
+    ...(inline ? [] : [`  const ref = useRef<HTMLDivElement>(null)`]),
+    `  const model = ${A.build}(c)`,
+    ...derived,
     ``,
-    `  // Keep the working HSV in sync when a controlled value changes underneath us.`,
-    `  useEffect(() => { if (valueProp !== undefined) { const next = deserialize(valueProp); if (next) setHsv(next) } }, [valueProp])`,
-    ``,
-    `  const commit = (next: HSV) => {`,
-    `    setHsv(next)`,
-    `    const out = serialize(next)`,
+    `  const commit = (nc: Working${withAlpha ? ', na: number' : ''}) => {`,
+    `    setC(nc)`,
+    ...(withAlpha ? [`    setAlpha(na)`] : []),
+    `    const out = serialize(nc, ${withAlpha ? 'na' : '1'})`,
     `    if (valueProp === undefined) setInternal(out)`,
     `    onValueChange?.(out)`,
     `  }`,
     ``,
-    `  useEffect(() => {`,
-    `    if (!open) return`,
-    `    const onDown = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false) }`,
-    `    document.addEventListener('mousedown', onDown)`,
-    `    return () => document.removeEventListener('mousedown', onDown)`,
-    `  }, [open])`,
+    `  // Keep the working color in sync when a controlled value changes underneath us.`,
+    `  useEffect(() => { if (valueProp !== undefined) { const d = deserialize(valueProp); if (d) { setC(d.c)${withAlpha ? '; setAlpha(d.a)' : ''} } } }, [valueProp])`,
+    ...(inline
+      ? []
+      : [
+          ``,
+          `  useEffect(() => {`,
+          `    if (!open) return`,
+          `    const onDown = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false) }`,
+          `    document.addEventListener('mousedown', onDown)`,
+          `    return () => document.removeEventListener('mousedown', onDown)`,
+          `  }, [open])`,
+        ]),
     ``,
-    `  // Pointer-drag the saturation/value area (hue fixed) and the hue track.`,
     `  const dragArea = (e: ReactPointerEvent) => {`,
     `    const rect = e.currentTarget.getBoundingClientRect()`,
-    `    const at = (cx: number, cy: number) => commit(hsvFromArea(hsv.h, (cx - rect.left) / rect.width, (cy - rect.top) / rect.height))`,
+    `    const at = (cx: number, cy: number) => ${commitCall(`${A.areaFrom}(c.h, (cx - rect.left) / rect.width, (cy - rect.top) / rect.height)`)}`,
     `    at(e.clientX, e.clientY)`,
     `    const move = (ev: PointerEvent) => at(ev.clientX, ev.clientY)`,
     `    const up = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up) }`,
@@ -2818,33 +3018,56 @@ function emitColorPicker(component: ComponentIR, options: EmitOptions): string {
     `  }`,
     `  const dragHue = (e: ReactPointerEvent) => {`,
     `    const rect = e.currentTarget.getBoundingClientRect()`,
-    `    const at = (cx: number) => commit({ ...hsv, h: hueFromTrack((cx - rect.left) / rect.width) })`,
+    `    const at = (cx: number) => ${commitCall(`{ ...c, h: hueFromTrack((cx - rect.left) / rect.width) }`)}`,
     `    at(e.clientX)`,
     `    const move = (ev: PointerEvent) => at(ev.clientX)`,
     `    const up = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up) }`,
     `    window.addEventListener('pointermove', move); window.addEventListener('pointerup', up)`,
     `  }`,
+    ...(withAlpha
+      ? [
+          `  const dragAlpha = (e: ReactPointerEvent) => {`,
+          `    const rect = e.currentTarget.getBoundingClientRect()`,
+          `    const at = (cx: number) => commit(c, alphaFromTrack((cx - rect.left) / rect.width))`,
+          `    at(e.clientX)`,
+          `    const move = (ev: PointerEvent) => at(ev.clientX)`,
+          `    const up = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up) }`,
+          `    window.addEventListener('pointermove', move); window.addEventListener('pointerup', up)`,
+          `  }`,
+        ]
+      : []),
+    ...(cfg.eyedropper
+      ? [
+          `  const pickEyedropper = async () => {`,
+          `    const Ctor = typeof window !== 'undefined' ? (window as unknown as { EyeDropper?: new () => { open: () => Promise<{ sRGBHex: string }> } }).EyeDropper : undefined`,
+          `    if (!Ctor) return`,
+          `    try { const r = await new Ctor().open(); const p = hexToRgba(r.sRGBHex); if (p) ${commitCall(`${A.fromRgb}(p.rgb)`)} } catch { /* user cancelled */ }`,
+          `  }`,
+        ]
+      : []),
     ``,
     `  return (`,
-    `    <div ref={ref}${rootStyle}>`,
-    `      <${trigTag}${sa(triggerNode)} type="button" aria-haspopup="dialog" aria-expanded={open} onClick={() => setOpen((o) => !o)}>`,
-    swatchNode
-      ? `        <${tagFor(swatchNode)}${sa(swatchNode)} aria-hidden style={{ background: model.hex }} />`
-      : `        <span aria-hidden style={{ width: '1em', height: '1em', borderRadius: '3px', background: model.hex }} />`,
-    `        <${valueTag}${sa(valueNode)}>{model.hex}</${valueTag}>`,
-    `      </${trigTag}>`,
-    `      {open && (`,
-    `        <${surfTag}${surfStyle} role="dialog">`,
-    `          <${areaNode ? tagFor(areaNode) : 'div'}${sa(areaNode)} onPointerDown={dragArea} style={{ position: 'relative', width: '100%', height: '9rem', borderRadius: '6px', touchAction: 'none', cursor: 'crosshair', background: ${areaBg} }}>`,
-    `            <span aria-hidden style={{ position: 'absolute', left: (model.area.x * 100) + '%', top: (model.area.y * 100) + '%', width: '12px', height: '12px', transform: 'translate(-50%, -50%)', borderRadius: '50%', border: '2px solid #fff', boxShadow: '0 0 0 1px rgba(0,0,0,0.4)' }} />`,
-    `          </${areaNode ? tagFor(areaNode) : 'div'}>`,
-    `          <${hueNode ? tagFor(hueNode) : 'div'}${sa(hueNode)} onPointerDown={dragHue} style={{ position: 'relative', width: '100%', height: '0.75rem', marginTop: '0.5rem', borderRadius: '999px', touchAction: 'none', cursor: 'ew-resize', background: ${hueBg} }}>`,
-    `            <span aria-hidden style={{ position: 'absolute', left: (model.hueX * 100) + '%', top: '50%', width: '14px', height: '14px', transform: 'translate(-50%, -50%)', borderRadius: '50%', border: '2px solid #fff', boxShadow: '0 0 0 1px rgba(0,0,0,0.4)', background: model.hueCss }} />`,
-    `          </${hueNode ? tagFor(hueNode) : 'div'}>`,
-    `          <input${sa(inputNode)} type="text" value={model.hex} aria-label="Hex color" onChange={(e) => { const next = hexToHsv(e.target.value); if (next) commit(next) }} style={{ marginTop: '0.5rem', width: '100%' }} />`,
-    `        </${surfTag}>`,
-    `      )}`,
-    `    </div>`,
+    ...(inline
+      ? [
+          `    <${surfTag}${styleAttrsFor(surface ?? root, [...SURFACE_BASE, ...nodeStyleDecls(surface ?? root, surfTag)])} role="group" aria-label="Color picker">`,
+          ...panel.map((l) => l.replace(/^ {8}/, '      ')),
+          `    </${surfTag}>`,
+        ]
+      : [
+          `    <div ref={ref}${styleAttrsFor(root, [...anchorDecls('popover'), ...nodeStyleDecls(root, 'div')])}>`,
+          `      <${trigTag}${sa(triggerNode)} type="button" aria-haspopup="dialog" aria-expanded={open} onClick={() => setOpen((o) => !o)}>`,
+          swatchNode
+            ? `        <${tagFor(swatchNode)}${sa(swatchNode)} aria-hidden style={{ background: model.hex }} />`
+            : `        <span aria-hidden style={{ width: '1em', height: '1em', borderRadius: '3px', background: model.hex }} />`,
+          `        <${valueTag}${sa(valueNode)}>{model.hex}</${valueTag}>`,
+          `      </${trigTag}>`,
+          `      {open && (`,
+          `        <${surfTag}${styleAttrsFor(surface ?? root, [...surfacePositionDecls('popover'), ...SURFACE_BASE, ...nodeStyleDecls(surface ?? root, surfTag)])} role="dialog">`,
+          ...panel,
+          `        </${surfTag}>`,
+          `      )}`,
+          `    </div>`,
+        ]),
     `  )`,
     `}`,
     ``,
@@ -2852,7 +3075,6 @@ function emitColorPicker(component: ComponentIR, options: EmitOptions): string {
 
   return lines.filter((l) => l !== '').join('\n') + '\n'
 }
-
 function emitMenu(
   component: ComponentIR,
   plan: DisclosurePlan,

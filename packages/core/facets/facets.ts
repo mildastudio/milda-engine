@@ -15,6 +15,21 @@ export interface FacetDef {
   scale: FacetScale
 }
 
+// Border applies to all sides (`border`) or a single edge — physical (top/right/…) or
+// logical (inline-start/…). Each carries width + color + style. `suffix` is the facet
+// key tail (empty for all-sides); `prop` is the CSS property prefix.
+export const BORDER_SIDES: { suffix: string; prop: string; label: string }[] = [
+  { suffix: '', prop: 'border', label: '' },
+  { suffix: '.top', prop: 'borderTop', label: 'top' },
+  { suffix: '.right', prop: 'borderRight', label: 'right' },
+  { suffix: '.bottom', prop: 'borderBottom', label: 'bottom' },
+  { suffix: '.left', prop: 'borderLeft', label: 'left' },
+  { suffix: '.inline-start', prop: 'borderInlineStart', label: 'inline-start' },
+  { suffix: '.inline-end', prop: 'borderInlineEnd', label: 'inline-end' },
+  { suffix: '.block-start', prop: 'borderBlockStart', label: 'block-start' },
+  { suffix: '.block-end', prop: 'borderBlockEnd', label: 'block-end' },
+]
+
 export const FACETS: Record<string, FacetDef> = {
   fill: { key: 'fill', label: 'Fill', scale: 'color' },
   ink: { key: 'ink', label: 'Ink', scale: 'color' },
@@ -28,10 +43,27 @@ export const FACETS: Record<string, FacetDef> = {
   'border.color': { key: 'border.color', label: 'Border color', scale: 'color' },
   'text.size': { key: 'text.size', label: 'Text size', scale: 'fontSize' },
   'text.weight': { key: 'text.weight', label: 'Weight', scale: 'fontWeight' },
+  font: { key: 'font', label: 'Font', scale: 'fontFamily' },
   elevation: { key: 'elevation', label: 'Elevation', scale: 'elevation' },
   opacity: { key: 'opacity', label: 'Opacity', scale: 'opacity' },
 
   ring: { key: 'ring', label: 'Focus ring', scale: 'color' },
+}
+
+// Register per-side border width/color facets (the all-sides `border.width`/`border.color`
+// are in the literal above). Style is emitted directly as a keyword, so it needs no scale.
+for (const { suffix, label } of BORDER_SIDES) {
+  if (!suffix) continue
+  FACETS[`border${suffix}.width`] = {
+    key: `border${suffix}.width`,
+    label: `Border ${label} width`,
+    scale: 'borderWidth',
+  }
+  FACETS[`border${suffix}.color`] = {
+    key: `border${suffix}.color`,
+    label: `Border ${label} color`,
+    scale: 'color',
+  }
 }
 
 export const KIND_FACETS: Record<NodeKind, string[]> = {
@@ -59,6 +91,8 @@ export const KIND_FACETS: Record<NodeKind, string[]> = {
     'border.width',
     'border.color',
     'text.weight',
+    'font',
+    'slant',
     'elevation',
     'ring',
   ],
@@ -74,8 +108,8 @@ export const KIND_FACETS: Record<NodeKind, string[]> = {
     'text.size',
     'ring',
   ],
-  output: ['fill', 'ink', 'corner', 'inset', 'text.size'],
-  text: ['ink', 'text.size', 'text.weight'],
+  output: ['fill', 'ink', 'corner', 'inset', 'text.size', 'text.weight', 'font', 'slant'],
+  text: ['ink', 'text.size', 'text.weight', 'font', 'slant'],
   icon: ['fill', 'corner'],
   content: ['corner', 'opacity'],
 
@@ -84,7 +118,7 @@ export const KIND_FACETS: Record<NodeKind, string[]> = {
   instance: [],
   table: ['fill', 'corner', 'border.width', 'border.color'],
   row: ['fill', 'ink', 'border.width', 'border.color'],
-  cell: ['fill', 'ink', 'inset', 'border.width', 'border.color', 'text.size', 'text.weight'],
+  cell: ['fill', 'ink', 'inset', 'border.width', 'border.color', 'text.size', 'text.weight', 'font', 'slant'],
 }
 
 export interface StyleDecl {
@@ -156,13 +190,19 @@ export function facetDecls(
     push('outline', `2px solid ${v('ring') ?? 'currentColor'}`)
     push('outlineOffset', '2px')
   }
-  if (facets['border.color'] || facets['border.width']) {
-    push('borderStyle', 'solid')
-    push('borderWidth', v('border.width') ?? '1px')
-    push('borderColor', v('border.color') ?? 'currentColor')
+  for (const { suffix, prop } of BORDER_SIDES) {
+    const style = facets[`border${suffix}.style`]
+    if (facets[`border${suffix}.color`] || facets[`border${suffix}.width`] || style) {
+      push(`${prop}Style`, style ?? 'solid') // style is a keyword, emitted as-is
+      push(`${prop}Width`, v(`border${suffix}.width`) ?? '1px')
+      push(`${prop}Color`, v(`border${suffix}.color`) ?? 'currentColor')
+    }
   }
   if (facets['text.size']) push('fontSize', v('text.size'))
   if (facets['text.weight']) push('fontWeight', v('text.weight'))
+  if (facets.font) push('fontFamily', v('font'))
+  // font-style is an enum keyword (normal|italic|oblique), not a token — emit as-is.
+  if (facets.slant) push('fontStyle', facets.slant)
   return out
 }
 
@@ -193,6 +233,8 @@ export const FACET_DEFAULTS: Record<string, StyleDecl[]> = {
   ],
   'text.size': [{ prop: 'fontSize', value: 'inherit' }],
   'text.weight': [{ prop: 'fontWeight', value: 'inherit' }],
+  font: [{ prop: 'fontFamily', value: 'inherit' }],
+  slant: [{ prop: 'fontStyle', value: 'normal' }],
   elevation: [{ prop: 'boxShadow', value: 'none' }],
   opacity: [{ prop: 'opacity', value: '1' }],
   ring: [{ prop: 'outline', value: 'none' }],

@@ -339,6 +339,13 @@ const DEFAULTS: Record<string, ArchetypePaint> = {
       surface: { ...overlaySurface, facets: { ...overlaySurface.facets, inset: 'sm', gap: 'sm' } },
       area: { facets: { fill: 'surface-sunken', corner: 'md' }, layout: { height: '120px' } },
       hue: { facets: { fill: 'surface-sunken', corner: 'pill' }, layout: { height: '12px' } },
+      alpha: { facets: { fill: 'surface-sunken', corner: 'pill' }, layout: { height: '12px' } },
+      eyedropper: {
+        ...inputBox,
+        facets: { ...inputBox.facets, corner: 'sm', inset: 'xs' },
+        layout: { direction: 'row', align: 'center', distribute: 'center', width: '30px', height: '30px' },
+      },
+      swatches: { facets: { gap: 'xs' }, layout: { direction: 'row', wrap: 'wrap' } },
       input: {
         facets: {
           fill: 'surface',
