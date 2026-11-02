@@ -1,6 +1,7 @@
 import type { ComponentContract, PropType, PropValue } from '../contract/types'
 import type { NodeBehavior } from '../behavior/free'
 import type { Predicate } from './predicate'
+import type { StateName } from '@mildastudio/milda'
 
 export type NodeKind =
   | 'container'
@@ -226,34 +227,9 @@ export type SlotSample =
   | { kind: 'example'; exampleId: string }
   | { kind: 'list'; items: SlotSample[] }
 
-export type StateName =
-  | 'hovered'
-  | 'pressed'
-  | 'focused'
-  | 'focus-visible'
-  | 'active'
-  | 'selected'
-  | 'checked'
-  | 'indeterminate'
-  | 'expanded'
-  | 'open'
-  | 'disabled'
-  | 'readonly'
-  | 'loading'
-  | 'error'
-  | 'success'
-  | 'first'
-  | 'last'
-  | 'odd'
-  | 'even'
-  // Calendar/time cell states (proposal 0029) - data-driven by the behavior core,
-  // stylable on the DatePicker `day` / TimePicker `option` parts.
-  | 'today'
-  | 'outside-month'
-  | 'range-start'
-  | 'range-end'
-  | 'in-range'
-  | 'highlighted'
+// The UI-state words are the language's closed list (`STATE_NAMES` in the milda vocabulary): the
+// IR stores exactly the words the reader accepts, and each target realizes all of them.
+export type { StateName }
 
 export type PropCondition = Record<string, PropValue>
 

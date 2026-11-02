@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest'
-import { MILDA_SURFACE_VERSION, parseMildaDocument } from '@mildastudio/milda'
+import {
+  MILDA_SURFACE_VERSION,
+  STATE_NAMES,
+  parseMildaDocument,
+  preludeV0,
+} from '@mildastudio/milda'
+import { ALL_STATE_NAMES } from '@mildastudio/core'
 import { documentToDsl } from './emit'
 import { documentToIr } from './toIr'
 import { dslLines, hasDslLine } from './testkit'
@@ -658,11 +664,18 @@ describe('the part header (0055)', () => {
     expect(r.issues).toEqual(['error part-header-word'])
   })
 
-  it('treats a header kind the language does not know as today’s unknown kind', () => {
+  // The reader says so where the file is written (an editor squiggle, a `milda-check` line), and
+  // the lowering still infers a kind rather than storing a word no target can realize.
+  it('treats a header kind the language does not know as today’s unknown kind, and says so', () => {
     const r = component('  part Box: widget {}')
-    expect(r.issues).toEqual([])
+    expect(r.issues).toEqual(['warning part-kind-unknown'])
     expect(r.irIssues.some((i) => i.includes('unknown kind "widget"'))).toBe(true)
     expect(r.node('Box')?.kind).not.toBe('widget')
+  })
+
+  it('says the same about the statement form, which is where an older file states its kind', () => {
+    const r = component('  part Box {\n    kind div\n  }')
+    expect(r.issues).toEqual(['warning part-kind-unknown'])
   })
 
   it('reports a colon with no kind after it', () => {
@@ -716,5 +729,110 @@ describe('the lock, derived', () => {
     const card = documentToIr(parsed.document).components[0]
     const nodes = Object.values(card.structure.nodes)
     expect(nodes.filter((n) => n.locked).map((n) => n.name)).toEqual(['Card'])
+  })
+})
+
+// ─── A state word is one of the language's ────────────────────────────────────
+// The reader used to take any word after `state`, so `state hover` (the CSS habit) read clean and
+// the rule simply never applied. It warns now, at every position a state is named, and keeps the
+// word: a lossless read, and an unknown state matches nothing.
+describe('an unknown state word', () => {
+  const warnings = (parts: string) =>
+    parseMildaDocument(`component Box {\n  archetype Button\n${parts}\n}\n`).issues.filter(
+      (i) => i.code === 'state-unknown',
+    )
+
+  it('is reported in a state block, with or without a condition', () => {
+    expect(component('  part Box {\n    state bogus { fill a }\n  }').issues).toEqual([
+      'warning state-unknown',
+    ])
+    expect(
+      component('  part Box {\n    state bogus when size = sm { fill a }\n  }').issues,
+    ).toEqual(['warning state-unknown'])
+  })
+
+  it('is reported in a binding, a `when state` leaf and an ancestor leaf', () => {
+    expect(component('  part Box {\n    bind state bogus on\n  }').issues).toEqual([
+      'warning state-unknown',
+    ])
+    expect(component('  part Box {\n    when state bogus { fill a }\n  }').issues).toEqual([
+      'warning state-unknown',
+    ])
+    expect(
+      component('  part Box {}\n  part Box.label {\n    when ancestor Box bogus { fill a }\n  }')
+        .issues,
+    ).toEqual(['warning state-unknown'])
+  })
+
+  it('is not reported for a word the language has, at any of those positions', () => {
+    const r = component(
+      '  part Box {\n    state focus-visible { fill a }\n    state hovered when size = sm { fill a }\n    bind state selected on\n  }\n  part Box.label {\n    when state today { fill a }\n    when ancestor Box pressed { fill a }\n  }',
+    )
+    expect(r.issues).toEqual([])
+  })
+
+  it('names every state, and the spelling a CSS writer meant', () => {
+    const [w] = warnings('  part Box {\n    state hover { fill a }\n  }')
+    expect(w?.severity).toBe('warning')
+    expect(w?.message).toContain("did you mean 'hovered'")
+    for (const s of STATE_NAMES) expect(w?.message).toContain(s)
+    expect(w?.line).toBe(4)
+  })
+
+  it('keeps the word in the IR rather than dropping the rule', () => {
+    const r = component('  part Box {\n    state hover { fill a }\n  }')
+    expect(r.node('Box')?.states?.flatMap((rule) => rule.states)).toEqual(['hover'])
+  })
+
+  // The prelude's taxonomy used to list five words of its behaviour machines as UI states. No
+  // target realizes them (the CSS emitter turned `state invalid` into an unconditional rule), so
+  // they are not states the language accepts until a target can draw them.
+  it('includes the behaviour-machine words no target realizes', () => {
+    for (const word of ['invalid', 'valid', 'dragging', 'empty', 'complete']) {
+      expect(warnings(`  part Box {\n    state ${word} { fill a }\n  }`)).toHaveLength(1)
+    }
+  })
+})
+
+describe('the state vocabulary', () => {
+  it('is one list: the IR, the prelude and the language agree word for word', () => {
+    expect(ALL_STATE_NAMES).toEqual([...STATE_NAMES])
+    expect(preludeV0.states.map((s) => s.name)).toEqual([...STATE_NAMES])
+  })
+})
+
+// A rule the Studio anchors on an ancestor (`anchorControlledChildStates`: the icon repaints when
+// its ToggleButton root is selected) is stored in the legacy fields, with no `when`. The printer's
+// state-block path knows nothing of `ancestorStates`, and wrote `state default` for it - the
+// condition gone and the rule dead on the way back in. The reader's new warning is what showed it.
+describe('an ancestor-anchored rule', () => {
+  it('prints as the ancestor predicate it is, and reads back to the same condition', () => {
+    const r = component('  part Box {}\n  part Box.label {\n    ink a\n  }')
+    const box = r.node('Box')!
+    const label = r.node('label')!
+    label.states = [
+      {
+        id: 'anchored',
+        props: {},
+        states: [],
+        ancestorStates: [{ nodeId: box.id, state: 'selected' }],
+        facets: { ink: 'b' },
+      },
+    ]
+    const text = documentToDsl({ components: r.components })
+    expect(hasDslLine(text, 'when ancestor Box selected {')).toBe(true)
+    expect(dslLines(text).filter((l) => /^state\b/.test(l))).toEqual([])
+
+    const back = parseMildaDocument(text)
+    expect(back.issues).toEqual([])
+    const ir = documentToIr(back.document)
+    const nodes = Object.values(ir.components[0]!.structure.nodes)
+    const backBox = nodes.find((n) => n.name === 'Box')!
+    const rule = nodes.find((n) => n.name === 'label')!.states![0]!
+    expect(rule.when).toEqual({
+      kind: 'cmp',
+      ref: { kind: 'ancestor', nodeId: backBox.id, state: 'selected' },
+      op: 'set',
+    })
   })
 })

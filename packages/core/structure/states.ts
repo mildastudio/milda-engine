@@ -10,6 +10,7 @@ import type {
 import { type ItemScope } from './binding'
 import { evalPredicate, representablePredicate } from './predicate'
 import { overlayFacets } from '../facets/intent'
+import { STATE_NAMES } from '@mildastudio/milda'
 
 // A StateRule whose rich `when` (0032) can't become a static CSS selector (OR/NOT/operators/
 // context) - the CSS target realizes it as a `[data-cond-<id>]` attribute the React generator
@@ -24,33 +25,9 @@ export function dataCondAttr(rule: StateRule): string {
   return `data-cond-${rule.id.replace(/[^a-z0-9]/gi, '')}`
 }
 
-export const ALL_STATE_NAMES: StateName[] = [
-  'hovered',
-  'pressed',
-  'focused',
-  'focus-visible',
-  'active',
-  'selected',
-  'checked',
-  'indeterminate',
-  'expanded',
-  'open',
-  'disabled',
-  'readonly',
-  'loading',
-  'error',
-  'success',
-  'first',
-  'last',
-  'odd',
-  'even',
-  'today',
-  'outside-month',
-  'range-start',
-  'range-end',
-  'in-range',
-  'highlighted',
-]
+// Every UI state, in the language's order. A copy, not the vocabulary itself: callers sort and
+// filter it, and the vocabulary is a readonly tuple.
+export const ALL_STATE_NAMES: StateName[] = [...STATE_NAMES]
 
 export const KIND_STATES: Record<NodeKind, StateName[]> = {
   container: ['hovered', 'pressed'],

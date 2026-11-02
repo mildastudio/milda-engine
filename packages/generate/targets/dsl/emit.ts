@@ -71,6 +71,7 @@ import {
   formatPosition,
   parseAxisSize,
   parsePosition,
+  predicateFromLegacy,
   BUILTIN_SHARED_TYPES,
   FACETS,
   formatLength,
@@ -1204,11 +1205,12 @@ const PRED_OP: Record<string, string> = {
 // it the same way, and the reader can resolve the path back to whatever id it minted.
 export type NodeAddresses = Map<string, string>
 
-// A state name is only PARTLY a closed vocabulary. `ALL_STATE_NAMES` is what core knows about
-// and every one of those is already lowercase, so lowercasing them is a no-op; a name outside
-// that set is one the author wrote (`highContrast` on the Radix Text/Code parts), and running
-// it through `seg()` renamed it to `highcontrast` on export - the same casing defect that was
-// fixed for prop names in `nameSeg` and never followed through to the state-ref path.
+// The state words are a closed vocabulary (`STATE_NAMES`, which `ALL_STATE_NAMES` copies), and
+// every one is already lowercase, so lowercasing them is a no-op. A word outside it is still
+// carried, because the read is lossless - the reader warns on it (`state-unknown`) and keeps it -
+// so it prints exactly as written (`highContrast` on the Radix Text/Code parts): running it
+// through `seg()` renamed it to `highcontrast` on export, the casing defect fixed for prop names
+// in `nameSeg` and never followed through to the state-ref path.
 const KNOWN_STATES = new Set<string>(ALL_STATE_NAMES)
 function stateSeg(s: string): string {
   const trimmed = String(s).trim()
@@ -1251,13 +1253,22 @@ function stateLines(
   if (!rules || rules.length === 0) return []
   const out: string[] = []
   for (const rule of rules) {
-    // Rich `when` predicate (0032): emit a faithful `when <predicate> { … }` block.
-    if (rule.when) {
+    // Rich `when` predicate (0032): emit a faithful `when <predicate> { … }` block. A legacy rule
+    // anchored on an ANCESTOR's state (the Studio's "when the root is selected") has no
+    // `state`-block spelling, so it prints as the predicate it already is: `when ancestor <path>
+    // <state>`. It used to fall through to the state-block path below, which knows nothing of
+    // `ancestorStates`, and came out as `state default` - the condition gone, the rule dead.
+    const rich =
+      rule.when ??
+      (rule.ancestorStates?.length
+        ? predicateFromLegacy(rule.props, rule.states, rule.ancestorStates)
+        : undefined)
+    if (rich) {
       const body = [
         ...facetLines(index, rule.facets, depth + 1),
         ...layoutBlock(index, rule.layout, rule.facets, depth + 1),
       ]
-      const pred = predToDsl(rule.when, addr)
+      const pred = predToDsl(rich, addr)
       if (body.length === 0) out.push(`${pad(depth)}when ${pred} {}`)
       else out.push(`${pad(depth)}when ${pred} {`, ...body, `${pad(depth)}}`)
       continue
