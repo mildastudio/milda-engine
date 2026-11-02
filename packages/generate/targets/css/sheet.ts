@@ -83,6 +83,14 @@ function stateSel(s: StateName, dataStates?: ReadonlySet<string>): string {
   return dataStates?.has(s) ? `[data-${s}]` : STATE_SELECTOR[s]
 }
 
+// Whether this target has a selector for a state at all. `StateName` is closed, but the DSL read
+// is lossless: a word outside the vocabulary (`state invalid`, which the reader warns on and keeps)
+// still reaches the IR, and `STATE_SELECTOR` has nothing for it. Its suffix would come out EMPTY,
+// turning "only while invalid" into "always" - so such a rule must never reach `ruleSuffix`.
+function realizes(s: string, dataStates?: ReadonlySet<string>): boolean {
+  return Boolean(dataStates?.has(s)) || Object.hasOwn(STATE_SELECTOR, s)
+}
+
 function statesSuffix(states: readonly StateName[], dataStates?: ReadonlySet<string>): string {
   return states.map((s) => stateSel(s, dataStates)).join('')
 }
@@ -123,6 +131,13 @@ export class StyleSheet {
   // declarations use, so a node and its `:hover` rule cannot disagree about whether a word is a
   // token or a literal.
   constructor(private readonly facetVar: FacetResolver = facetCssVar) {}
+
+  // State rules this sheet could not express, in the author's terms - the CSS half of the
+  // target's `skipped` report.
+  private unrealized: string[] = []
+  get skipped(): readonly string[] {
+    return this.unrealized
+  }
 
   private names = new Map<string, string>()
   private used = new Map<string, number>()
@@ -196,13 +211,20 @@ export class StyleSheet {
   // (`.button:hover .icon`) so the child restyles when that ancestor enters the state,
   // matching the editor. Multiple anchors nest outermost-first by tree depth. If no
   // anchor resolves (unset resolver / unknown id), the rule falls back to self-scoped.
-  private ruleSelector(name: string, nodeId: string, rule: StateRule): string {
+  //
+  // A rule conditioned on a state this target cannot select comes back as the list of those
+  // states instead of a selector: the caller leaves it out and says so.
+  private ruleSelector(
+    name: string,
+    nodeId: string,
+    rule: StateRule,
+  ): { selector: string } | { unrealized: string[] } {
     // Rich `when` predicate (0032): a representable one decomposes back to the props/states/
     // ancestorStates selector path below; anything richer keys off a computed `[data-cond-<id>]`
     // attribute the React generator sets (so OR/NOT/operators still restyle).
     if (rule.when) {
       const rep = representablePredicate(rule.when)
-      if (rep === null) return `.${name}[${dataCondAttr(rule)}]`
+      if (rep === null) return { selector: `.${name}[${dataCondAttr(rule)}]` }
       rule = {
         ...rule,
         when: undefined,
@@ -211,6 +233,10 @@ export class StyleSheet {
         ancestorStates: rep.ancestorStates,
       }
     }
+    const unrealized = [...rule.states, ...(rule.ancestorStates ?? []).map((c) => c.state)].filter(
+      (s) => !realizes(s, this.dataStates),
+    )
+    if (unrealized.length) return { unrealized: [...new Set(unrealized)] }
     // Fold any self state that's controlled on an ANCESTOR into an implicit ancestorState (only
     // when we can actually emit the anchor - anchorResolver present), so `.part[data-selected]`
     // (dead: the part never gets data-selected) becomes `.root[data-selected] .part`.
@@ -234,7 +260,7 @@ export class StyleSheet {
 
     const selfSel = `.${name}${ruleSuffix(eff, this.dataStates, this.propValue)}`
     const conds = eff.ancestorStates ?? []
-    if (conds.length === 0 || !this.anchorResolver) return selfSel
+    if (conds.length === 0 || !this.anchorResolver) return { selector: selfSel }
 
     const byNode = new Map<string, { node: ComponentNode; depth: number; states: StateName[] }>()
     for (const c of conds) {
@@ -244,13 +270,13 @@ export class StyleSheet {
       entry.states.push(c.state)
       byNode.set(c.nodeId, entry)
     }
-    if (byNode.size === 0) return selfSel
+    if (byNode.size === 0) return { selector: selfSel }
 
     const chain = [...byNode.values()]
       .sort((a, b) => a.depth - b.depth)
       .map((a) => `.${this.allocate(a.node)}${statesSuffix(a.states, this.dataStates)}`)
       .join(' ')
-    return `${chain} ${selfSel}`
+    return { selector: `${chain} ${selfSel}` }
   }
 
   register(node: ComponentNode, baseDecls: StyleDecl[], parent?: LayoutParent): NodeStyleBinding {
@@ -263,11 +289,19 @@ export class StyleSheet {
     if (!this.done.has(node.id)) {
       this.done.add(node.id)
       if (hasBase) this.serialize(`.${name}`, baseDecls)
-      for (const rule of rules)
-        this.serialize(
-          this.ruleSelector(name, node.id, rule),
-          ruleDecls(rule, this.facetVar, parent),
-        )
+      for (const rule of rules) {
+        const sel = this.ruleSelector(name, node.id, rule)
+        if ('unrealized' in sel) {
+          const words = sel.unrealized.map((s) => `"${s}"`).join(', ')
+          const what = sel.unrealized.length > 1 ? `states ${words} have` : `state ${words} has`
+          this.unrealized.push(
+            `part "${leafOf(node) ?? node.name}": ${what} no web realization, so the rule ` +
+              `was left out rather than applied in every state.`,
+          )
+          continue
+        }
+        this.serialize(sel.selector, ruleDecls(rule, this.facetVar, parent))
+      }
     }
     return {
       className: name,

@@ -72,6 +72,7 @@ import {
   parseAxisSize,
   parsePosition,
   predicateFromLegacy,
+  representablePredicate,
   BUILTIN_SHARED_TYPES,
   FACETS,
   formatLength,
@@ -1230,9 +1231,9 @@ function predToDsl(p: Predicate, addr?: NodeAddresses): string {
       r.kind === 'prop'
         ? r.path
         : r.kind === 'state'
-          ? `state ${r.state}`
+          ? `state ${stateSeg(r.state)}`
           : r.kind === 'ancestor'
-            ? `ancestor ${addrOf(addr, r.nodeId)} ${r.state}`
+            ? `ancestor ${addrOf(addr, r.nodeId)} ${stateSeg(r.state)}`
             : `context ${r.group}`
     if (p.op === 'set') return name
     if (p.op === 'unset') return `not ${name}`
@@ -1242,6 +1243,42 @@ function predToDsl(p: Predicate, addr?: NodeAddresses): string {
   const item = (q: Predicate) =>
     q.kind === 'all' || q.kind === 'any' ? `(${predToDsl(q, addr)})` : predToDsl(q, addr)
   return p.items.map(item).join(p.kind === 'all' ? ' and ' : ' or ')
+}
+
+// A rule with no condition at all - no props, no states, no ancestor anchor, and no `when` or an
+// empty one. The surface has no spelling for "always", and the two it used to reach for both
+// changed the meaning: `state default` reads back as a state word the language does not know, so
+// the rule matched nothing, and an empty `when` printed `when  {`, which does not parse.
+function isUnconditional(rule: StateRule): boolean {
+  const c = rule.when ? representablePredicate(rule.when) : rule
+  return (
+    c !== null &&
+    Object.keys(c.props).length === 0 &&
+    c.states.length === 0 &&
+    !c.ancestorStates?.length
+  )
+}
+
+// What an unconditional rule MEANS is the part's own styling, and that is what it prints as: its
+// facets and layout fold over the part's, in rule order, and the rule itself is not printed. The
+// web target already read it that way - `.part { … }` after the base block, beaten by every
+// conditioned selector on specificity - so the fold makes the file say what the generated library
+// does. The file is the fixed point (invariant 6): the folded part reads back with no such rule,
+// and prints the same again.
+function foldUnconditional(node: ComponentNode): {
+  facets: Record<string, string> | undefined
+  layout: Record<string, string> | undefined
+  states: StateRule[] | undefined
+} {
+  const always = (node.states ?? []).filter(isUnconditional)
+  if (always.length === 0) return { facets: node.facets, layout: node.layout, states: node.states }
+  let facets = node.facets
+  let layout = node.layout
+  for (const rule of always) {
+    if (rule.facets) facets = { ...facets, ...rule.facets }
+    if (rule.layout) layout = { ...layout, ...rule.layout }
+  }
+  return { facets, layout, states: node.states?.filter((r) => !isUnconditional(r)) }
 }
 
 function stateLines(
@@ -1258,9 +1295,11 @@ function stateLines(
     // `state`-block spelling, so it prints as the predicate it already is: `when ancestor <path>
     // <state>`. It used to fall through to the state-block path below, which knows nothing of
     // `ancestorStates`, and came out as `state default` - the condition gone, the rule dead.
+    // Neither has a rule on SEVERAL states: a `state` block names one, and printing one block per
+    // state turned "hovered AND pressed" into "hovered OR pressed". The conjunction is a predicate.
     const rich =
       rule.when ??
-      (rule.ancestorStates?.length
+      (rule.ancestorStates?.length || rule.states.length > 1
         ? predicateFromLegacy(rule.props, rule.states, rule.ancestorStates)
         : undefined)
     if (rich) {
@@ -1290,22 +1329,18 @@ function stateLines(
       ...facetLines(index, rule.facets, depth + 1),
       ...layoutBlock(index, rule.layout, rule.facets, depth + 1),
     ]
-    const names = rule.states.length
-      ? rule.states.map((s) => stateSeg(String(s)))
-      : when
-        ? []
-        : ['default']
-
-    if (names.length === 0) {
+    // At most one state is left here (several went to the predicate above), and at least one
+    // condition: an unconditional rule never reaches this function (`foldUnconditional`).
+    const [state] = rule.states
+    if (state === undefined) {
       // Prop-only paint (no interaction state): a state-less `when` block.
       if (body.length === 0) out.push(`${pad(depth)}when ${when} {}${extra}`)
       else out.push(`${pad(depth)}when ${when} {${extra}`, ...body, `${pad(depth)}}`)
       continue
     }
-    for (const name of names) {
-      if (body.length === 0) out.push(`${pad(depth)}state ${name}${whenClause} {}${extra}`)
-      else out.push(`${pad(depth)}state ${name}${whenClause} {${extra}`, ...body, `${pad(depth)}}`)
-    }
+    const name = stateSeg(String(state))
+    if (body.length === 0) out.push(`${pad(depth)}state ${name}${whenClause} {}${extra}`)
+    else out.push(`${pad(depth)}state ${name}${whenClause} {${extra}`, ...body, `${pad(depth)}}`)
   }
   return out
 }
@@ -1621,9 +1656,10 @@ function emitPart(
   if (node.mediaAlt) body.push(`${pad(depth + 1)}alt ${contentValue(node.mediaAlt)}`)
   if (node.destination) body.push(`${pad(depth + 1)}destination ${contentValue(node.destination)}`)
 
-  body.push(...layoutBlock(index, node.layout, node.facets, depth + 1))
-  body.push(...facetLines(index, node.facets, depth + 1))
-  body.push(...stateLines(index, node.states, depth + 1, ctx.addr))
+  const own = foldUnconditional(node)
+  body.push(...layoutBlock(index, own.layout, own.facets, depth + 1))
+  body.push(...facetLines(index, own.facets, depth + 1))
+  body.push(...stateLines(index, own.states, depth + 1, ctx.addr))
   if (node.motion) body.push(...motionLines(index, node.motion, depth + 1))
 
   // The per-archetype config surfaces. Printed from an explicit table so a new config on

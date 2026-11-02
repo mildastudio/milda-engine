@@ -4,7 +4,6 @@ import {
   componentUsesContext,
   resolveTag,
   toComponentFiles,
-  untypedConstraints,
   toIconModule,
   toMildaContextModule,
   type EmitOptions,
@@ -39,9 +38,11 @@ export interface GeneratedFile {
 //      on a path that bypassed the seam entirely.
 //
 // Both are now in the interface. React's `skipped` is a claim rather than a formality: the web
-// target expresses everything the IR carries in its RENDERING. What it reports is the one thing a
-// type cannot say - an interface constraint whose condition has no TypeScript form (proposal 0052
-// §4.1) - which the generated component still accepts, and the checker enforces instead.
+// target expresses everything the vocabulary lets the IR say in its RENDERING. What it reports is
+// what falls outside that: an interface constraint whose condition has no TypeScript form
+// (proposal 0052 §4.1), which the generated component still accepts and the checker enforces
+// instead, and a state rule conditioned on a word the language does not know (the read keeps it,
+// the style sheet has no selector for it), which is left out rather than applied unconditionally.
 
 export interface TargetOutput {
   files: GeneratedFile[]
@@ -97,33 +98,40 @@ export interface ComponentTarget extends Target {
   context?(): GeneratedFile | null
 }
 
+// One component's files and what they could not express. `emit` keeps the files; `emitDocument`
+// keeps both, from the same emission.
+function emitReactComponent(
+  ir: ComponentIR,
+  options?: Record<string, unknown>,
+): { files: GeneratedFile[]; skipped: string[] } {
+  const name = componentName(ir)
+  const { tsx, css, skipped } = toComponentFiles(ir, (options ?? {}) as EmitOptions)
+  const files: GeneratedFile[] = [{ path: `${name}.tsx`, language: 'tsx', code: tsx }]
+
+  if (css.trim()) files.push({ path: `${name}.module.css`, language: 'css', code: css })
+  // Behavior delivery (proposal 0029 §8.3): 'vendored' (default) copies the core
+  // beside the component; 'package' imports it from a shared package instead, so no
+  // sibling is emitted (the core ships once via behaviorPackageFiles(), letting a
+  // React + Vue microfrontend share the exact same module).
+  const delivery = (options as EmitOptions | undefined)?.behaviorDelivery ?? 'vendored'
+  if (delivery !== 'package') {
+    if (ir.archetype === 'DatePicker') {
+      files.push({ path: 'calendar.ts', language: 'ts', code: CALENDAR_CORE_SOURCE })
+    }
+    if (ir.archetype === 'TimePicker') {
+      files.push({ path: 'timepicker.ts', language: 'ts', code: TIME_CORE_SOURCE })
+    }
+    if (ir.archetype === 'ColorPicker') {
+      files.push({ path: 'color.ts', language: 'ts', code: COLOR_CORE_SOURCE })
+    }
+  }
+  return { files, skipped }
+}
+
 const reactTarget: ComponentTarget = {
   name: 'react',
   granularity: 'component',
-  emit: (ir, options) => {
-    const name = componentName(ir)
-    const { tsx, css } = toComponentFiles(ir, (options ?? {}) as EmitOptions)
-    const files: GeneratedFile[] = [{ path: `${name}.tsx`, language: 'tsx', code: tsx }]
-
-    if (css.trim()) files.push({ path: `${name}.module.css`, language: 'css', code: css })
-    // Behavior delivery (proposal 0029 §8.3): 'vendored' (default) copies the core
-    // beside the component; 'package' imports it from a shared package instead, so no
-    // sibling is emitted (the core ships once via behaviorPackageFiles(), letting a
-    // React + Vue microfrontend share the exact same module).
-    const delivery = (options as EmitOptions | undefined)?.behaviorDelivery ?? 'vendored'
-    if (delivery !== 'package') {
-      if (ir.archetype === 'DatePicker') {
-        files.push({ path: 'calendar.ts', language: 'ts', code: CALENDAR_CORE_SOURCE })
-      }
-      if (ir.archetype === 'TimePicker') {
-        files.push({ path: 'timepicker.ts', language: 'ts', code: TIME_CORE_SOURCE })
-      }
-      if (ir.archetype === 'ColorPicker') {
-        files.push({ path: 'color.ts', language: 'ts', code: COLOR_CORE_SOURCE })
-      }
-    }
-    return files
-  },
+  emit: (ir, options) => emitReactComponent(ir, options).files,
   theme: (foundations, assets) => ({
     path: 'theme.css',
     language: 'css',
@@ -147,21 +155,16 @@ const reactTarget: ComponentTarget = {
     // every caller that loops `emit()` already has to de-duplicate by path.
     const seen = new Set(files.map((f) => f.path))
     const emitOptions = { foundations: doc.foundations ?? defaultFoundations(), ...options }
+    const skipped: string[] = []
     for (const ir of components) {
-      for (const file of reactTarget.emit(ir, emitOptions)) {
+      const out = emitReactComponent(ir, emitOptions)
+      skipped.push(...out.skipped)
+      for (const file of out.files) {
         if (seen.has(file.path)) continue
         seen.add(file.path)
         files.push(file)
       }
     }
-    // Nothing is dropped from what renders: every facet, behavior and length the IR carries has a
-    // web realization. What a type could not narrow is listed (0052 §4.1); asked only of a
-    // component that has a constraint, since the answer for the rest is known to be none.
-    const skipped = components
-      .filter(
-        (c) => c.contract?.constraints?.length || c.contract?.props.some((p) => p.requiredWhen),
-      )
-      .flatMap((c) => untypedConstraints(c, options as EmitOptions))
     return { files, skipped }
   },
 }

@@ -601,14 +601,20 @@ function presenceExpr(ctx: EmitCtx, node: ComponentNode): string | null {
 
 // data-cond attributes (0032 §4.2) for a node's rich `when` styling rules that the CSS
 // target keyed off `[data-cond-<id>]`. Each is set from the rule's predicate boolean, so a
-// styling condition with OR/NOT/operators restyles at runtime. Rules whose predicate can't
-// be expressed in JS (ancestor/context leaves) are skipped - those stay CSS-selector-only.
+// styling condition with OR/NOT/operators restyles at runtime. A rule whose predicate can't be
+// expressed in JS (a pointer state no prop binds, an ancestor's state) gets no attribute and so
+// never applies; that is recorded once per rule for the `skipped` report rather than left silent.
 function condAttrs(ctx: EmitCtx, node: ComponentNode): string {
   return (node.states ?? [])
     .filter(ruleNeedsDataCond)
     .map((r) => {
       const expr = r.when ? predicateExpr(ctx, r.when, node) : null
-      return expr === null ? '' : ` ${dataCondAttr(r)}={${expr} ? '' : undefined}`
+      if (expr !== null) return ` ${dataCondAttr(r)}={${expr} ? '' : undefined}`
+      const note =
+        `part "${node.part?.split('.').pop() ?? node.name}": a condition combines a state or an ` +
+        `ancestor the generated component cannot read at runtime, so the rule is never applied.`
+      if (!ctx.deadConditions.includes(note)) ctx.deadConditions.push(note)
+      return ''
     })
     .join('')
 }
@@ -766,6 +772,12 @@ interface EmitCtx {
   // context (0032 phase 4) - the component then imports + calls the MildaContext hook.
   usesMildaContext: boolean
 
+  // Rich `when` rules (0032) whose condition has a leaf generated React cannot evaluate at runtime
+  // (a pointer state no prop binds, an ancestor's state). The style sheet keys such a rule off a
+  // `data-cond` attribute only the runtime sets, so the rule can never apply: it is reported in
+  // the target's `skipped` list instead of disappearing.
+  deadConditions: string[]
+
   props: Map<string, PropDef>
 
   iconLib: IconLibrary | undefined
@@ -856,6 +868,7 @@ function createEmitCtx(component: ComponentIR, options: EmitOptions): EmitCtx {
     usesIconComponent: false,
     usesIconNameType: false,
     usesMildaContext: false,
+    deadConditions: [],
     props: new Map((component.contract?.props ?? []).map((p) => [p.name, p])),
     iconLib: options.icons,
     assets: options.assets,
@@ -4017,34 +4030,71 @@ function buildControlledStateAnchor(
 
 // The interface constraints (proposal 0052 §4.1) narrow whatever props interface the component's
 // emitter wrote, so they are applied once here rather than in each of the archetype emitters. What
-// a type cannot say comes back in `skipped`, for the target's report.
+// a type cannot say comes back in `untyped`; a state rule the style sheet had no selector for comes
+// back in `unrealized`. Both are for the target's `skipped` report.
 function emitComponent(
   component: ComponentIR,
   options: EmitOptions = {},
   sharedTypes: SharedType[] = [],
-): { tsx: string; css: string; skipped: string[] } {
-  const out = emitComponentBody(component, options, sharedTypes)
+): { tsx: string; css: string; untyped: string[]; unrealized: string[] } {
+  const ctx = createEmitCtx(component, options)
+  const name = componentName(component)
+  const out = emitComponentBody(ctx, component, options, sharedTypes)
   const typed = applyInterfaceConstraints(
     out.tsx,
     component,
-    componentName(component),
+    name,
     camelCase,
     options.contextGroups,
   )
-  return { ...out, tsx: typed.tsx, skipped: typed.skipped }
+  return {
+    ...out,
+    tsx: typed.tsx,
+    untyped: typed.skipped,
+    unrealized: [
+      ...ctx.sheet.skipped,
+      ...ctx.deadConditions,
+      ...unsetConditions(component, out.css, typed.tsx, ctx.deadConditions),
+    ].map((s) => `${name}: ${s}`),
+  }
+}
+
+// The backstop behind `condAttrs`: a `[data-cond-…]` selector in the sheet whose attribute the
+// component never writes. Each archetype's render path has to remember to set the attribute, and
+// the root and the custom toggles did not - so instead of trusting every path, compare what the
+// sheet keys off with what the markup writes. A rule found here is one that can never apply.
+function unsetConditions(
+  component: ComponentIR,
+  css: string,
+  tsx: string,
+  alreadyReported: readonly string[],
+): string[] {
+  const out: string[] = []
+  for (const node of Object.values(component.structure.nodes)) {
+    for (const rule of (node.states ?? []).filter(ruleNeedsDataCond)) {
+      const attr = dataCondAttr(rule)
+      if (!css.includes(`[${attr}]`) || tsx.includes(`${attr}=`)) continue
+      const part = node.part?.split('.').pop() ?? node.name
+      const note =
+        `part "${part}": a condition combines a state or an ancestor the generated component ` +
+        `cannot read at runtime, so the rule is never applied.`
+      if (!alreadyReported.includes(note) && !out.includes(note)) out.push(note)
+    }
+  }
+  return out
 }
 
 /** What a component's constraints could not become as types - for a target's `skipped` list. */
 export function untypedConstraints(component: ComponentIR, options: EmitOptions = {}): string[] {
-  return emitComponent(component, options, options.sharedTypes ?? []).skipped
+  return emitComponent(component, options, options.sharedTypes ?? []).untyped
 }
 
 function emitComponentBody(
+  ctx: EmitCtx,
   component: ComponentIR,
   options: EmitOptions = {},
   sharedTypes: SharedType[] = [],
 ): { tsx: string; css: string } {
-  const ctx = createEmitCtx(component, options)
   const name = componentName(component)
   const root = component.structure.nodes[component.structure.rootId]
   if (!root) return { tsx: `export function ${name}() {\n  return null\n}\n`, css: '' }
@@ -4130,9 +4180,12 @@ function emitComponentBody(
     .map((d) => ` ${d.attr}={${bindingExpr(d.prop)}}`)
     .join('')
   const contextData = contextPropAttrs(ctx, component)
-  const rootData = togglePlan
-    ? `${variantData}${contextData} data-${togglePlan.dataState}={${togglePlan.stateVar} ? '' : undefined} aria-pressed={${togglePlan.stateVar}}`
-    : variantData + contextData + stateBindingAttrs(root)
+  // The root's own rich `when` rules (0032) need their data-cond attribute set here too: the
+  // sheet keys them off it exactly as it does a child's, and without it they never applied.
+  const rootData =
+    (togglePlan
+      ? `${variantData}${contextData} data-${togglePlan.dataState}={${togglePlan.stateVar} ? '' : undefined} aria-pressed={${togglePlan.stateVar}}`
+      : variantData + contextData + stateBindingAttrs(root)) + condAttrs(ctx, root)
   // Secondary activation on the region presents a context menu (proposal 0032's
   // `openOn: 'context'`), which is the whole of how a ContextMenu is invoked - the same
   // handler the canvas installs in `applyDisclosure`.
@@ -4474,15 +4527,16 @@ export function toComponentStyles(
   return emitComponent(component, options, sharedTypes).css
 }
 
+// `skipped` is everything this component's emission could not express, in the author's terms.
 export function toComponentFiles(
   component: ComponentIR,
   options: EmitOptions = {},
   sharedTypes: SharedType[] = [],
-): { tsx: string; css: string } {
-  const { tsx, css } = emitComponent(
+): { tsx: string; css: string; skipped: string[] } {
+  const { tsx, css, untyped, unrealized } = emitComponent(
     component,
     options,
     sharedTypes.length ? sharedTypes : (options.sharedTypes ?? []),
   )
-  return { tsx, css }
+  return { tsx, css, skipped: [...unrealized, ...untyped] }
 }
