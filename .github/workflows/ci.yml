@@ -16,7 +16,38 @@ jobs:
       # The npm bundled with Node trips on this tree ("edgesOut" of null); release.yml
       # installs the current npm for the same reason, so CI builds what release ships.
       - run: npm install -g npm@latest
+      # The language comes from the milda-lang mirror's source, not from npm. Every
+      # version bump reaches this repo before @mildastudio/milda is published, so an
+      # install from the registry fails on exactly the commits that move the two
+      # together. Cloned into packages/milda, the `packages/*` workspace glob links it.
+      # The mirror pushes both repos in parallel, so wait until milda-lang carries a
+      # version that satisfies what core asks for.
+      - name: Check out the language this tree depends on
+        run: |
+          WANT=$(node -p "require('./packages/core/package.json').dependencies['@mildastudio/milda']")
+          for ATTEMPT in $(seq 1 20); do
+            rm -rf packages/milda
+            git clone --quiet --depth 1 https://github.com/mildastudio/milda-lang.git packages/milda
+            HAVE=$(node -p "require('./packages/milda/package.json').version")
+            if node -e '
+              const [want, have] = process.argv.slice(1)
+              const min = want.replace(/^\^/, "").split(".").map(Number)
+              const v = have.split(".").map(Number)
+              const fixed = min[0] === 0 ? 2 : 1 // caret: 0.x pins the minor, >=1 the major
+              const same = v.slice(0, fixed).every((n, i) => n === min[i])
+              const atLeast = v[0] - min[0] || v[1] - min[1] || v[2] - min[2]
+              process.exit(same && atLeast >= 0 ? 0 : 1)
+            ' "$WANT" "$HAVE"; then
+              echo "@mildastudio/milda $HAVE satisfies $WANT"
+              exit 0
+            fi
+            echo "milda-lang is at $HAVE, this tree needs $WANT; waiting for the mirror ($ATTEMPT/20)"
+            sleep 30
+          done
+          echo "::error::milda-lang never reached $WANT"
+          exit 1
       - run: npm install
+      - run: npm run build -w @mildastudio/milda
       - run: npm run build
       - run: npm run typecheck
       - run: npm run check:containment

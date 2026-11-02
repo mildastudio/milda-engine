@@ -27,4 +27,17 @@ jobs:
       - run: npm install -g npm@latest # trusted publishing needs npm >= 11.5.1
       - run: npm install
       - run: npm run build
-      - run: npm publish -w @mildastudio/core -w @mildastudio/contract -w @mildastudio/generate -w @mildastudio/release --provenance --access public
+      # One package at a time, skipping what npm already has: a single `npm publish -w`
+      # over all four fails as a whole on the first version that exists, which is
+      # exactly the state a partial failure leaves behind. Dependency order.
+      - name: Publish (each package unless its version is already on npm)
+        run: |
+          for PKG in core contract generate release; do
+            NAME=$(node -p "require('./packages/$PKG/package.json').name")
+            VERSION=$(node -p "require('./packages/$PKG/package.json').version")
+            if [ -n "$(npm view "$NAME@$VERSION" version 2>/dev/null)" ]; then
+              echo "$NAME@$VERSION is already on npm"
+            else
+              npm publish -w "$NAME" --provenance --access public
+            fi
+          done
