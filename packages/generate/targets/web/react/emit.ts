@@ -1,28 +1,53 @@
+import type { StyleDecl } from '../_shared/decl'
 import {
-  anchorDecls,
-  backdropDecls,
   baselineDecls,
-  collectSlots,
   cssVarRef,
   easingVarName,
   facetCssVar,
   facetDecls,
-  iconifySvgUrl,
-  isRawValue,
   layoutVarDecls,
+  type LayoutLoweringOptions,
+  makeFacetVarResolver,
   motionDecls,
+  timingTransitionDecl,
+  controlTransitionProps,
+  CHECKBOX_ROOT_DECLS,
+  CHECKBOX_INDICATOR_DECLS,
+  CHECKBOX_GLYPH_DECLS,
+  CHECKBOX_GLYPH_CHECKED_DECLS,
+  CHECKBOX_FOCUS_DECLS,
+  CHECKBOX_DISABLED_DECLS,
+  SWITCH_TRACK_DECLS,
+  SWITCH_THUMB_DECLS,
+  SWITCH_THUMB_CHECKED_DECLS,
+  SR_ONLY_DECLS,
+  anchorDecls,
+  backdropDecls,
+  surfacePositionDecls,
+} from '../_shared'
+import { contextDataAttr, contextValue } from '../_shared'
+import {
+  collectSlots,
+  iconifySvgUrl,
+  couldBeLiteral,
   normalizeNodeContent,
   resolveIcon,
   resolveMediaSource,
   planBehavior,
   planCompound,
   normalizeContentValue,
-  surfacePositionDecls,
+  contextOfValue,
   type ComponentIR,
   type ComponentNode,
   type ContentValue,
+  type ContextGroup,
+  type DocumentFoundations,
+  type FacetResolver,
   type DisclosurePlan,
+  type OpenTrigger,
+  type SelectionPlan,
   type EventDef,
+  type EventEmission,
   type IconLibrary,
   coercePredicate,
   ruleNeedsDataCond,
@@ -33,7 +58,6 @@ import {
   type PropType,
   type SharedType,
   type SlotSurface,
-  type StyleDecl,
   type OverlayManagementBehavior,
   type OverlayPlacement,
   effectiveValueType,
@@ -45,22 +69,11 @@ import {
   materializedToggleParts,
   isNameableControl,
   activatingLabel,
-  CHECKBOX_ROOT_DECLS,
-  CHECKBOX_INDICATOR_DECLS,
-  CHECKBOX_GLYPH_DECLS,
-  CHECKBOX_GLYPH_CHECKED_DECLS,
-  CHECKBOX_FOCUS_DECLS,
-  CHECKBOX_DISABLED_DECLS,
-  SWITCH_TRACK_DECLS,
-  SWITCH_THUMB_DECLS,
-  SWITCH_THUMB_CHECKED_DECLS,
   CHECKBOX_INDICATOR_TRANSITION,
   CHECKBOX_GLYPH_TRANSITION,
   SWITCH_TRACK_TRANSITION,
   SWITCH_THUMB_TRANSITION,
-  timingTransitionDecl,
   type ControlTransition,
-  SR_ONLY_DECLS,
   normalizeColorPicker,
   type ResolvedColorPicker,
   type ColorFormat,
@@ -76,6 +89,8 @@ import {
   type StateName,
 } from '@mildastudio/core'
 import { StyleSheet } from '../../css/sheet'
+import { applyInterfaceConstraints } from './constraints'
+import { reactHandlerProp } from './interaction'
 
 export interface ReactSurface {
   className: boolean
@@ -102,6 +117,11 @@ export function resolveSurface(component: ComponentIR, options: EmitOptions): Re
 }
 
 export interface EmitOptions {
+  // The token set the package's `theme.css` is written from. Given, a facet value becomes a
+  // `var()` only when one of these tokens claims it and is otherwise read as a literal (proposal
+  // 0049); absent, every value is taken for a token id, which is what a bare `emit()` always did.
+  foundations?: DocumentFoundations
+
   emitStyle?: 'compound' | 'props' | 'both'
   naming?: 'dot' | 'flat'
   forwardRef?: boolean
@@ -117,6 +137,10 @@ export interface EmitOptions {
 
   icons?: IconLibrary
   assets?: Record<string, { url?: string }>
+
+  // The document's context groups, needed by any prop TYPED BY one (proposal 0001): its TS type
+  // is the group's contexts, and the value it carries selects that context for this instance.
+  contextGroups?: DocumentFoundations['contextGroups']
 
   // DatePicker date-value representation (proposal 0029 §4.1), a project/publish-level
   // choice covering the ecosystem union. Defaults: isoDate + object range.
@@ -160,11 +184,46 @@ function emitsList(node: ComponentNode, component: ComponentIR): boolean {
   )
 }
 
+// The web element a neutral node KIND lowers to. `auto` used to mean `div` for every kind,
+// which is wrong for an icon or a text run and - more importantly - made `tag` load-bearing
+// information that a platform-neutral `.milda` cannot carry (proposal 0041): a file that
+// spells out `div`/`span`/`svg` is a DOM description, not a design system. With this, `kind`
+// is enough, and the element becomes what it always should have been: a target decision.
+const KIND_ELEMENT: Partial<Record<ComponentNode['kind'], string>> = {
+  text: 'span',
+  icon: 'svg',
+  item: 'li',
+  control: 'button',
+  input: 'input',
+  content: 'img',
+  table: 'table',
+  row: 'tr',
+  cell: 'td',
+  fragment: 'div',
+}
+
+export function kindElement(node: ComponentNode): string {
+  return KIND_ELEMENT[node.kind] ?? 'div'
+}
+
 export function resolveTag(node: ComponentNode, component: ComponentIR): string {
   if (node.parentId === null) {
     return rootElement(component)
   }
-  if (node.tag === 'auto') return 'div'
+  if (node.tag === 'auto') {
+    // An `li` is only an `li` inside a list, same rule as the explicit-tag path below.
+    const derived = kindElement(node)
+    if (derived === 'li') {
+      const parent = component.structure.nodes[node.parentId]
+      if (!parent || !emitsList(parent, component)) return 'div'
+    }
+    if (derived === 'div' && emitsList(node, component)) return 'ul'
+    // A `button` takes PHRASING content, so a `div` inside one is invalid HTML. The explicit-tag
+    // path below has said so for a while; the derived path had not, so a container part inside a
+    // button root emitted a div anyway (the Radix Button's spinner overlay is one).
+    if (derived === 'div' && rootElement(component) === 'button') return 'span'
+    return derived
+  }
   if (emitsList(node, component)) return 'ul'
 
   if (node.kind === 'container' && node.tag === 'div' && rootElement(component) === 'button') {
@@ -212,7 +271,7 @@ function childrenOf(node: ComponentNode, component: ComponentIR): ComponentNode[
     .filter((n): n is ComponentNode => Boolean(n))
 }
 
-function tsType(t: PropType, sharedTypes: SharedType[] = []): string {
+function tsType(ctx: EmitCtx, t: PropType, sharedTypes: SharedType[] = []): string {
   switch (t.kind) {
     case 'string':
       return 'string'
@@ -222,20 +281,31 @@ function tsType(t: PropType, sharedTypes: SharedType[] = []): string {
       return 'boolean'
     case 'enum':
       return t.values.length ? t.values.map((v) => JSON.stringify(v)).join(' | ') : 'string'
+    // A prop typed by a context group is a closed set of names - the group's contexts - so it
+    // types as their union. `unknown` was what a consumer got before (via a dangling shared-type
+    // ref), which typechecks and admits anything, so the whole Radix variant matrix was a prop
+    // nobody could use correctly and nothing read.
+    case 'context': {
+      const group = ctx.contextGroups.get(t.group)
+      const values = (group?.contexts ?? []).map((c) => contextValue(c.name))
+      return values.length ? values.map((v) => JSON.stringify(v)).join(' | ') : 'string'
+    }
     case 'union':
-      return t.members.length ? t.members.map((m) => tsType(m, sharedTypes)).join(' | ') : 'unknown'
+      return t.members.length
+        ? t.members.map((m) => tsType(ctx, m, sharedTypes)).join(' | ')
+        : 'unknown'
     case 'array': {
-      const inner = tsType(t.item, sharedTypes)
+      const inner = tsType(ctx, t.item, sharedTypes)
       return t.item.kind === 'union' ? `(${inner})[]` : `${inner}[]`
     }
     case 'object':
-      return `{ ${t.fields.map((f) => `${f.name}${f.required ? '' : '?'}: ${tsType(f.type, sharedTypes)}`).join('; ')} }`
+      return `{ ${t.fields.map((f) => `${f.name}${f.required ? '' : '?'}: ${tsType(ctx, f.type, sharedTypes)}`).join('; ')} }`
     case 'component':
       return 'ReactNode'
     case 'ref': {
       if (t.ref === BUILTIN_ICON_NAME_ID) {
-        if (!hasIconModule()) return 'string'
-        usesIconNameType = true
+        if (!hasIconModule(ctx)) return 'string'
+        ctx.usesIconNameType = true
         return 'IconName'
       }
       if (t.ref === BUILTIN_FILE_ID) return 'File'
@@ -247,7 +317,7 @@ function tsType(t: PropType, sharedTypes: SharedType[] = []): string {
       if (params.length > 0) {
         const argTypes = params.map((_, i) => {
           const arg = t.args?.[i]
-          return arg ? tsType(arg, sharedTypes) : 'unknown'
+          return arg ? tsType(ctx, arg, sharedTypes) : 'unknown'
         })
         return `${name}<${argTypes.join(', ')}>`
       }
@@ -260,19 +330,23 @@ function tsType(t: PropType, sharedTypes: SharedType[] = []): string {
     case 'any':
       return 'unknown'
     case 'function': {
-      const ps = t.params.map((p) => `${p.name}: ${tsType(p.type, sharedTypes)}`).join(', ')
-      return `(${ps}) => ${tsType(t.returnType, sharedTypes)}`
+      const ps = t.params.map((p) => `${p.name}: ${tsType(ctx, p.type, sharedTypes)}`).join(', ')
+      return `(${ps}) => ${tsType(ctx, t.returnType, sharedTypes)}`
     }
     case 'record':
-      return `Record<${tsType(t.key, sharedTypes)}, ${tsType(t.value, sharedTypes)}>`
+      return `Record<${tsType(ctx, t.key, sharedTypes)}, ${tsType(ctx, t.value, sharedTypes)}>`
     case 'intersection':
-      return t.members.map((m) => tsType(m, sharedTypes)).join(' & ')
+      return t.members.map((m) => tsType(ctx, m, sharedTypes)).join(' & ')
   }
 }
 
-function propTypeLines(component: ComponentIR, sharedTypes: SharedType[] = []): string[] {
+function propTypeLines(
+  ctx: EmitCtx,
+  component: ComponentIR,
+  sharedTypes: SharedType[] = [],
+): string[] {
   return (component.contract?.props ?? []).map(
-    (p) => `  ${camelCase(p.name)}${p.required ? '' : '?'}: ${tsType(p.type, sharedTypes)}`,
+    (p) => `  ${camelCase(p.name)}${p.required ? '' : '?'}: ${tsType(ctx, p.type, sharedTypes)}`,
   )
 }
 
@@ -284,11 +358,17 @@ function eventHandlerName(name: string): string {
   return `on${pascalCase(name)}`
 }
 
-function eventPropLines(events: EventDef[] = [], sharedTypes: SharedType[] = []): string[] {
+function eventPropLines(
+  ctx: EmitCtx,
+  events: EventDef[] = [],
+  sharedTypes: SharedType[] = [],
+): string[] {
   return events
     .filter((e) => e.name)
     .map((e) => {
-      const sig = e.payload ? `(payload: ${tsType(e.payload, sharedTypes)}) => void` : `() => void`
+      const sig = e.payload
+        ? `(payload: ${tsType(ctx, e.payload, sharedTypes)}) => void`
+        : `() => void`
       return `  ${eventHandlerName(e.name)}?: ${sig}`
     })
 }
@@ -343,30 +423,34 @@ const NATIVE_HANDLERS = new Set([
   'onCut',
 ])
 
-function customEventPropLines(events: EventDef[] = [], sharedTypes: SharedType[] = []): string[] {
-  return eventPropLines(events, sharedTypes).filter((line) => {
+function customEventPropLines(
+  ctx: EmitCtx,
+  events: EventDef[] = [],
+  sharedTypes: SharedType[] = [],
+): string[] {
+  return eventPropLines(ctx, events, sharedTypes).filter((line) => {
     const handler = line.trim().split('?:')[0]
     return !NATIVE_HANDLERS.has(handler)
   })
 }
 
-function emittedEventNames(component: ComponentIR): string[] {
+function emittedEventNames(ctx: EmitCtx, component: ComponentIR): string[] {
   const names = new Set<string>()
   for (const n of Object.values(component.structure.nodes))
-    for (const e of n.emits ?? []) names.add(emissionEventName(e.eventId))
+    for (const e of n.emits ?? []) names.add(emissionEventName(ctx, e.eventId))
   return [...names]
 }
-function emittedHandlerNames(component: ComponentIR): string[] {
-  return emittedEventNames(component).map(eventHandlerName)
+function emittedHandlerNames(ctx: EmitCtx, component: ComponentIR): string[] {
+  return emittedEventNames(ctx, component).map(eventHandlerName)
 }
 
-function interfaceEventDefs(component: ComponentIR): EventDef[] {
+function interfaceEventDefs(ctx: EmitCtx, component: ComponentIR): EventDef[] {
   const byName = new Map<string, EventDef>()
   for (const e of component.contract?.events ?? []) if (e.name) byName.set(e.name, e)
   const props = component.contract?.props ?? []
   for (const node of Object.values(component.structure.nodes)) {
     for (const em of node.emits ?? []) {
-      const name = emissionEventName(em.eventId)
+      const name = emissionEventName(ctx, em.eventId)
       if (!name || byName.has(name)) continue
       const pv = em.payload
       let payload: PropType | undefined
@@ -394,6 +478,25 @@ function repeatItemsExpr(source: RepeatSource): string {
   return JSON.stringify(source.items ?? [])
 }
 
+// An instance's prop value, as an expression. A literal passed to a context-typed prop is spelled
+// the way the target's union spells it - `variant={"soft"}`, never the stored `"Soft"`, which the
+// prop's own type would reject and the release build would fail on.
+function instancePropExpr(
+  ctx: EmitCtx,
+  target: ComponentIR,
+  propName: string,
+  value: ContentValue,
+): string {
+  const type = target.contract?.props.find((p) => p.name === propName)?.type
+  if (type?.kind === 'context') {
+    const v = normalizeContentValue(value)
+    const group = ctx.contextGroups.get(type.group)
+    const literal = v.kind === 'value' && group ? contextLiteral(group, v.value) : undefined
+    if (literal) return literal
+  }
+  return contentValueExpr(value)
+}
+
 function contentValueExpr(value: ContentValue): string {
   const v = normalizeContentValue(value)
   return v.kind === 'value' ? JSON.stringify(v.value) : bindingExpr(v.propName)
@@ -414,11 +517,24 @@ const NATIVE_PRESENCE_STATE_PROP: Record<string, string> = {
 
 // The prop-backed boolean a presence `state` reads (0031). A stateBinding wins (the
 // authored prop→state wiring); otherwise the native-prop convention. Returns undefined
-// for states with no runtime boolean (auto/interaction) — the editor never offers those
+// for states with no runtime boolean (auto/interaction) - the editor never offers those
 // for presence, so this only fires on prop-driven states.
-function presenceStateExpr(node: ComponentNode, state: string): string | undefined {
+function presenceStateExpr(
+  node: ComponentNode,
+  state: string,
+  // The nearest ancestor holding a binding for this state, when the node has none of its own.
+  owner?: (nodeId: string, state: string) => ComponentNode | undefined,
+): string | undefined {
   const binding = (node.stateBindings ?? []).find((b) => b.state === state)
   if (binding) return bindingExpr(binding.propName)
+  // A state is a fact about the COMPONENT, not only about the node that reads it: the Radix
+  // Button binds `loading` on its root and gates its spinner on it. Self-only lookup made that
+  // presence unexpressible, so the spinner rendered unconditionally. The CSS side already flows
+  // a root-controlled state down to every part (`buildControlledStateAnchor`), and the preview
+  // does the same; this makes the runtime guard agree with them.
+  const controlling = owner?.(node.id, state)
+  const inherited = (controlling?.stateBindings ?? []).find((b) => b.state === state)
+  if (inherited) return bindingExpr(inherited.propName)
   const native = NATIVE_PRESENCE_STATE_PROP[state]
   return native ? bindingExpr(native) : undefined
 }
@@ -433,28 +549,28 @@ const PREDICATE_CMP_JS: Record<string, string> = {
 }
 
 // The JS boolean a predicate leaf's referenced value reads, or null when it has no static
-// runtime representation in generated React (context — pending 0032 phase 4 — and
+// runtime representation in generated React (context - pending 0032 phase 4 - and
 // non-prop-reachable states). Prop leaves use `bindingExpr` (repeat-item-alias aware).
-function predicateRefExpr(ref: PredicateRef, node: ComponentNode): string | null {
+function predicateRefExpr(ctx: EmitCtx, ref: PredicateRef, node: ComponentNode): string | null {
   if (ref.kind === 'prop') return bindingExpr(ref.path)
-  if (ref.kind === 'state') return presenceStateExpr(node, ref.state) ?? null
+  if (ref.kind === 'state') return presenceStateExpr(node, ref.state, ctx.stateOwner) ?? null
   // Foundations context (0032 phase 4): read the active context id from the MildaContext
-  // hook. `_mildaCtx` is declared once in the component body when usesMildaContext is set.
+  // hook. `_mildaCtx` is declared once in the component body when `usesMildaContext` is set.
   if (ref.kind === 'context') {
-    usesMildaContext = true
+    ctx.usesMildaContext = true
     return `_mildaCtx[${JSON.stringify(ref.group)}]`
   }
-  // ancestor — CSS-only, no runtime JS boolean.
+  // ancestor - CSS-only, no runtime JS boolean.
   return null
 }
 
 // Recursively translate a predicate (0032) to a JS boolean expression, or null when any
 // part can't be expressed (fail-open: the caller then renders unconditionally rather than
 // wrongly hiding). Groups parenthesize their members so precedence is explicit.
-function predicateExpr(p: Predicate, node: ComponentNode): string | null {
+function predicateExpr(ctx: EmitCtx, p: Predicate, node: ComponentNode): string | null {
   switch (p.kind) {
     case 'cmp': {
-      const left = predicateRefExpr(p.ref, node)
+      const left = predicateRefExpr(ctx, p.ref, node)
       if (left === null) return null
       if (p.op === 'set') return left
       if (p.op === 'unset') return `!(${left})`
@@ -462,13 +578,13 @@ function predicateExpr(p: Predicate, node: ComponentNode): string | null {
       return `${left} ${PREDICATE_CMP_JS[p.op]} ${JSON.stringify(p.value)}`
     }
     case 'not': {
-      const e = predicateExpr(p.item, node)
+      const e = predicateExpr(ctx, p.item, node)
       return e === null ? null : `!(${e})`
     }
     case 'all':
     case 'any': {
       if (p.items.length === 0) return p.kind === 'all' ? 'true' : 'false'
-      const parts = p.items.map((i) => predicateExpr(i, node))
+      const parts = p.items.map((i) => predicateExpr(ctx, i, node))
       if (parts.some((x) => x === null)) return null
       return parts.map((x) => `(${x})`).join(p.kind === 'all' ? ' && ' : ' || ')
     }
@@ -477,21 +593,21 @@ function predicateExpr(p: Predicate, node: ComponentNode): string | null {
 
 // The JS boolean guarding a node's conditional presence, or null when unconditional
 // (absent predicate, an always-true predicate, or one that can't be expressed).
-function presenceExpr(node: ComponentNode): string | null {
+function presenceExpr(ctx: EmitCtx, node: ComponentNode): string | null {
   if (!node.presence) return null
-  const expr = predicateExpr(node.presence, node)
+  const expr = predicateExpr(ctx, node.presence, node)
   return expr === null || expr === 'true' ? null : expr
 }
 
 // data-cond attributes (0032 §4.2) for a node's rich `when` styling rules that the CSS
 // target keyed off `[data-cond-<id>]`. Each is set from the rule's predicate boolean, so a
 // styling condition with OR/NOT/operators restyles at runtime. Rules whose predicate can't
-// be expressed in JS (ancestor/context leaves) are skipped — those stay CSS-selector-only.
-function condAttrs(node: ComponentNode): string {
+// be expressed in JS (ancestor/context leaves) are skipped - those stay CSS-selector-only.
+function condAttrs(ctx: EmitCtx, node: ComponentNode): string {
   return (node.states ?? [])
     .filter(ruleNeedsDataCond)
     .map((r) => {
-      const expr = r.when ? predicateExpr(r.when, node) : null
+      const expr = r.when ? predicateExpr(ctx, r.when, node) : null
       return expr === null ? '' : ` ${dataCondAttr(r)}={${expr} ? '' : undefined}`
     })
     .join('')
@@ -502,17 +618,23 @@ function condAttrs(node: ComponentNode): string {
 // JSX expression container `{cond && ( … )}`; inside a `.map(…)` arrow return or array
 // literal it must be a bare JS expression `cond && ( … )` (no braces), so callers there
 // pass `braces: false`.
-function wrapPresence(node: ComponentNode, el: string, pad: string, braces = true): string {
-  const cond = presenceExpr(node)
+function wrapPresence(
+  ctx: EmitCtx,
+  node: ComponentNode,
+  el: string,
+  pad: string,
+  braces = true,
+): string {
+  const cond = presenceExpr(ctx, node)
   if (!cond) return el
   const guard = `(${cond}) && (\n${el}\n${pad})`
   return braces ? `${pad}{${guard}}` : `${pad}${guard}`
 }
 
-function contentExpr(node: ComponentNode): string | null {
+function contentExpr(ctx: EmitCtx, node: ComponentNode): string | null {
   // Authored content (a literal or a bound prop) always wins over the default-slot
   // fallback: `slot.default` only means "accept {children} when nothing else is
-  // authored" — an author who binds real content has moved off the slot, and the
+  // authored" - an author who binds real content has moved off the slot, and the
   // generated component must honor THAT, not silently drop it for `{children}`.
   const c = normalizeNodeContent(node.content)
   if (c) {
@@ -521,8 +643,12 @@ function contentExpr(node: ComponentNode): string | null {
     for (let i = c.rules.length - 1; i >= 0; i--) {
       // A rule's predicate (0032) becomes the ternary test. An inexpressible predicate
       // (context/unreachable leaf, pending later phases) skips the rule rather than
-      // emitting broken code — the fallthrough (`expr`) covers it.
-      const cond = predicateExpr(coercePredicate(c.rules[i].when) ?? { kind: 'all', items: [] }, node)
+      // emitting broken code - the fallthrough (`expr`) covers it.
+      const cond = predicateExpr(
+        ctx,
+        coercePredicate(c.rules[i].when) ?? { kind: 'all', items: [] },
+        node,
+      )
       if (cond === null) continue
       expr = `${cond} ? ${contentValueExpr(c.rules[i].value)} : ${expr}`
     }
@@ -532,8 +658,8 @@ function contentExpr(node: ComponentNode): string | null {
   return null
 }
 
-function textContent(node: ComponentNode): string {
-  const expr = contentExpr(node)
+function textContent(ctx: EmitCtx, node: ComponentNode): string {
+  const expr = contentExpr(ctx, node)
   if (expr !== null) return `{${expr}}`
   return node.name
 }
@@ -555,7 +681,19 @@ function inputTypeFor(t: PropType | undefined): string {
   }
 }
 
-function nodeStyleDecls(node: ComponentNode, tag: string): StyleDecl[] {
+// The parent a node is laid out in, which the web lowering needs to know whether a `fill` is on
+// the shared axis, whether the node sits in a `layers` stack, and what inset a `bleed` cancels
+// (proposal 0056 §3.4). The base layout and facets: a rule on the parent that changes its
+// direction does not re-lower the children, which is the one approximation this takes.
+function layoutParentOf(ctx: EmitCtx, node: ComponentNode): LayoutLoweringOptions {
+  const parent = node.parentId ? ctx.nodes[node.parentId] : undefined
+  return {
+    ...(parent ? { parent: { layout: parent.layout, facets: parent.facets } } : {}),
+    facet: ctx.facetVar,
+  }
+}
+
+function nodeStyleDecls(ctx: EmitCtx, node: ComponentNode, tag: string): StyleDecl[] {
   const buttonish = tag === 'button' || tag === 'a'
   const base: StyleDecl[] = []
   if (buttonish) {
@@ -571,8 +709,8 @@ function nodeStyleDecls(node: ComponentNode, tag: string): StyleDecl[] {
   const decls = [
     ...baselineDecls(node),
     ...base,
-    ...layoutVarDecls(node.layout),
-    ...facetDecls(node.facets, facetCssVar),
+    ...layoutVarDecls(node.layout, layoutParentOf(ctx, node)),
+    ...facetDecls(node.facets, ctx.facetVar),
 
     ...motionDecls(node.motion, durationVarRef, easingVarRef),
   ]
@@ -602,7 +740,154 @@ function styleLiteral(decls: StyleDecl[]): string {
   return decls.map((d) => `${String(d.prop)}: '${d.value}'`).join(', ')
 }
 
-let activeSheet = new StyleSheet()
+// Everything one component's emission needs to know about itself, threaded explicitly.
+//
+// This used to be 18 module-level `let` bindings reset at the top of `emitComponent`, which
+// made emission a singleton: a nested or concurrent `emitComponent` would silently overwrite
+// the outer one's sheet, icon flags and behavior plans. It was also the reason this file
+// could not be split - moving a helper out would have promoted ambient state into a
+// cross-module mutable singleton, which is strictly worse. With the state named and passed,
+// emission is re-entrant and the file is free to come apart along its natural seams.
+//
+// Some fields are decided once per component (`props`, `surface`, the behavior plans); others
+// accumulate during emission (`sheet`, `instances`, the `uses*` flags) and are read afterwards
+// to decide imports. `selectionCond` is the one field that is saved and restored around a
+// subtree rather than only appended to.
+interface EmitCtx {
+  sheet: StyleSheet
+
+  // Facet value -> CSS, for every declaration this component emits (see `EmitOptions.foundations`).
+  facetVar: FacetResolver
+
+  usesIconComponent: boolean
+  usesIconNameType: boolean
+
+  // Set when a component's predicate (presence/content/styling) gates on a foundations
+  // context (0032 phase 4) - the component then imports + calls the MildaContext hook.
+  usesMildaContext: boolean
+
+  props: Map<string, PropDef>
+
+  iconLib: IconLibrary | undefined
+  assets: Record<string, { url?: string }> | undefined
+
+  componentsById: Map<string, ComponentIR>
+  // The component's own nodes, so a node can find its parent (the layout lowering needs it).
+  nodes: Record<string, ComponentNode>
+  instances: Set<string>
+
+  // Context groups by id, for a prop typed by one (proposal 0001).
+  contextGroups: Map<string, DocumentFoundations['contextGroups'][number]>
+
+  // The nearest ANCESTOR node that binds a given state to a prop, for a node that does not bind
+  // it itself. A state belongs to the component, so a child's presence guard has to be able to
+  // read the state its root controls (see `presenceStateExpr`).
+  stateOwner: (nodeId: string, state: string) => ComponentNode | undefined
+
+  eventNames: Map<string, string>
+
+  // The payload type each handler prop is DECLARED with in the emitted interface, keyed by
+  // event name - the same resolution `interfaceEventDefs` uses. Call sites reconcile their
+  // argument against this: an arity mismatch (payload-less event called with a value, or a
+  // declared payload called with nothing) is a hard tsc error in the released package.
+  eventPayloads: Map<string, PropType | undefined>
+
+  surface: ReactSurface
+
+  // Two different questions, deliberately two fields. `selectionAria` is the archetype's
+  // WAI-ARIA contract (tablist/tab, radiogroup/radio, listbox/option) and comes from core's
+  // `planBehavior` - the same plan the Studio canvas renders from. `selection` is the
+  // RUNTIME selection state, which only exists once the author has wired a `value` prop and
+  // a bound repeat. Folding the first into the second is what shipped a seeded Tabs as a
+  // roleless <div> while the canvas showed its designer a real tab list.
+  selectionAria: SelectionPlan | null
+  selection: SelectionInfo | null
+  selectionCond: string | null
+  stepper: StepperInfo | null
+  slider: SliderInfo | null
+  textEntry: TextEntryInfo | null
+
+  a11y: A11yPlan
+}
+
+// Walks strictly UPWARD from a node to the first ancestor that binds `state` to a prop. The
+// node's own binding is the caller's business (it wins); this answers "who else knows".
+function buildStateOwner(
+  component: ComponentIR,
+): (nodeId: string, state: string) => ComponentNode | undefined {
+  const nodes = component.structure.nodes
+  const parent = new Map<string, string>()
+  const walk = (id: string) => {
+    for (const childId of nodes[id]?.childrenIds ?? []) {
+      parent.set(childId, id)
+      walk(childId)
+    }
+  }
+  walk(component.structure.rootId)
+  return (nodeId, state) => {
+    let cur = parent.get(nodeId)
+    while (cur) {
+      const node = nodes[cur]
+      if (node?.stateBindings?.some((b) => b.state === state)) return node
+      cur = parent.get(cur)
+    }
+    return undefined
+  }
+}
+
+function createEmitCtx(component: ComponentIR, options: EmitOptions): EmitCtx {
+  const facetVar = options.foundations ? makeFacetVarResolver(options.foundations) : facetCssVar
+  const sheet = new StyleSheet(facetVar)
+  // A `when variant = Secondary` rule on a context-typed prop must select the value the
+  // attribute carries, which is the context's public spelling (`contextPropAttrs` below). Any
+  // other prop keeps the IR's value, which is also what its attribute carries.
+  const groups = new Map((options.contextGroups ?? []).map((g) => [g.id, g]))
+  sheet.setPropValueSpelling((prop, value) => {
+    const p = (component.contract?.props ?? []).find((x) => x.name === prop)
+    const group = p?.type.kind === 'context' ? groups.get(p.type.group) : undefined
+    if (!group) return String(value)
+    const id = contextOfValue(group, value)
+    const name = id ? group.contexts.find((c) => c.id === id)?.name : undefined
+    return name ? contextValue(name) : String(value)
+  })
+  const ctx: EmitCtx = {
+    sheet,
+    facetVar,
+    usesIconComponent: false,
+    usesIconNameType: false,
+    usesMildaContext: false,
+    props: new Map((component.contract?.props ?? []).map((p) => [p.name, p])),
+    iconLib: options.icons,
+    assets: options.assets,
+    componentsById: new Map(Object.entries(options.componentsById ?? {})),
+    nodes: component.structure.nodes,
+    instances: new Set(),
+    stateOwner: buildStateOwner(component),
+    contextGroups: new Map((options.contextGroups ?? []).map((g) => [g.id, g])),
+    eventNames: new Map((component.contract?.events ?? []).map((e) => [e.id, e.name])),
+    eventPayloads: new Map(),
+    surface: resolveSurface(component, options),
+    // Planned up front for the same reason `a11y` is: the vertical emitters return long
+    // before `emitComponent` reaches the generic path, and a plan computed down there would
+    // be invisible to them.
+    selectionAria: selectionAriaPlan(component),
+    selection: null,
+    selectionCond: null,
+    stepper: null,
+    slider: null,
+    textEntry: null,
+    // Planned here rather than part-way down `emitComponent`, where it used to sit. The
+    // vertical emitters (date/time/colour picker, compound, disclosure, select, combobox,
+    // menu) all return before that point, so they ran against an empty plan and would have
+    // dropped `aria-labelledby`/`aria-describedby` silently the moment one of them reached
+    // a labelling helper. Output over the whole example library is unchanged by moving it.
+    a11y: planA11y(component),
+  }
+  // Resolving event payloads reads `eventNames` back off the context, so it can only run
+  // once the object exists.
+  ctx.eventPayloads = new Map(interfaceEventDefs(ctx, component).map((e) => [e.name, e.payload]))
+  return ctx
+}
 
 function staticIconName(node: ComponentNode): string | undefined {
   const c = node.content
@@ -614,50 +899,24 @@ function staticIconName(node: ComponentNode): string | undefined {
   return undefined
 }
 
-let usesIconComponent = false
-
-let usesIconNameType = false
-
-// Set when a component's predicate (presence/content/styling) gates on a foundations
-// context (0032 phase 4) — the component then imports + calls the MildaContext hook.
-let usesMildaContext = false
-
-function hasIconModule(): boolean {
-  return (activeIconLib?.icons.length ?? 0) > 0
+function hasIconModule(ctx: EmitCtx): boolean {
+  return (ctx.iconLib?.icons.length ?? 0) > 0
 }
 
-function mildaContextImport(): string[] {
-  return usesMildaContext ? [`import { useMildaContext } from './MildaContext'`] : []
+function mildaContextImport(ctx: EmitCtx): string[] {
+  return ctx.usesMildaContext ? [`import { useMildaContext } from './MildaContext'`] : []
 }
 
-let activeProps = new Map<string, PropDef>()
-
-let activeIconLib: IconLibrary | undefined
-let activeAssets: Record<string, { url?: string }> | undefined
-
-let componentsById = new Map<string, ComponentIR>()
-let activeInstances = new Set<string>()
-
-let activeEventNames = new Map<string, string>()
-
-function emissionEventName(eventId: string): string {
-  return activeEventNames.get(eventId) ?? eventId
+function emissionEventName(ctx: EmitCtx, eventId: string): string {
+  return ctx.eventNames.get(eventId) ?? eventId
 }
 
-let activeSurface: ReactSurface = SEALED_SURFACE
+function eventPayloadType(ctx: EmitCtx, name: string): PropType | undefined {
+  return ctx.eventPayloads.get(name)
+}
 
-let activeSelection: SelectionInfo | null = null
-
-let activeSelectionCond: string | null = null
-
-let activeStepper: StepperInfo | null = null
-
-let activeSlider: SliderInfo | null = null
-
-let activeTextEntry: TextEntryInfo | null = null
-
-function instanceImport(): string[] {
-  return [...activeInstances].sort().map((n) => `import { ${n} } from './${n}'`)
+function instanceImport(ctx: EmitCtx): string[] {
+  return [...ctx.instances].sort().map((n) => `import { ${n} } from './${n}'`)
 }
 
 interface A11yPlan {
@@ -671,14 +930,6 @@ interface A11yPlan {
 
   needsUseId: boolean
 }
-let activeA11y: A11yPlan = {
-  labelId: new Map(),
-  controlId: new Map(),
-  labelFor: new Map(),
-  describedId: new Map(),
-  needsUseId: false,
-}
-
 function planA11y(component: ComponentIR): A11yPlan {
   const nodes = component.structure.nodes
   const labelId = new Map<string, string>()
@@ -713,27 +964,27 @@ function planA11y(component: ComponentIR): A11yPlan {
   }
 }
 
-function a11yAttrs(node: ComponentNode): string {
+function a11yAttrs(ctx: EmitCtx, node: ComponentNode): string {
   const a = node.a11y
   if (!a) return ''
   let out = ''
   if (a.name) out += ` aria-label={${contentValueExpr(a.name)}}`
-  const cid = activeA11y.controlId.get(node.id)
+  const cid = ctx.a11y.controlId.get(node.id)
   if (cid) out += ` id={${cid}}`
-  else if (a.labelledBy && activeA11y.labelId.has(a.labelledBy)) {
-    out += ` aria-labelledby={${activeA11y.labelId.get(a.labelledBy)}}`
+  else if (a.labelledBy && ctx.a11y.labelId.has(a.labelledBy)) {
+    out += ` aria-labelledby={${ctx.a11y.labelId.get(a.labelledBy)}}`
   }
-  if (a.describedBy && activeA11y.describedId.has(a.describedBy)) {
-    out += ` aria-describedby={${activeA11y.describedId.get(a.describedBy)}}`
+  if (a.describedBy && ctx.a11y.describedId.has(a.describedBy)) {
+    out += ` aria-describedby={${ctx.a11y.describedId.get(a.describedBy)}}`
   }
   return out
 }
 
-function a11yLabelAttrs(node: ComponentNode): string {
+function a11yLabelAttrs(ctx: EmitCtx, node: ComponentNode): string {
   let out = ''
-  const forExpr = activeA11y.labelFor.get(node.id)
+  const forExpr = ctx.a11y.labelFor.get(node.id)
   if (forExpr) out += ` htmlFor={${forExpr}}`
-  const idExpr = activeA11y.labelId.get(node.id) ?? activeA11y.describedId.get(node.id)
+  const idExpr = ctx.a11y.labelId.get(node.id) ?? ctx.a11y.describedId.get(node.id)
   if (idExpr) out += ` id={${idExpr}}`
   return out
 }
@@ -744,15 +995,15 @@ function boundIconProp(node: ComponentNode): string | undefined {
   return undefined
 }
 
-function iconModuleImport(): string[] {
-  if (usesIconComponent) return [`import { Icon, type IconName } from './Icon'`]
+function iconModuleImport(ctx: EmitCtx): string[] {
+  if (ctx.usesIconComponent) return [`import { Icon, type IconName } from './Icon'`]
 
-  if (usesIconNameType) return [`import type { IconName } from './Icon'`]
+  if (ctx.usesIconNameType) return [`import type { IconName } from './Icon'`]
   return []
 }
 
-function iconMaskUrl(glyph: string): string | undefined {
-  const resolved = resolveIcon(glyph, activeIconLib, activeAssets)
+function iconMaskUrl(ctx: EmitCtx, glyph: string): string | undefined {
+  const resolved = resolveIcon(glyph, ctx.iconLib, ctx.assets)
   if (!resolved) return undefined
   if (resolved.kind === 'custom') return resolved.url
   if (resolved.svg) return `data:image/svg+xml,${encodeURIComponent(resolved.svg)}`
@@ -804,13 +1055,14 @@ function predHasContextLeaf(p: Predicate | undefined): boolean {
 }
 
 // Whether any of a component's predicates (presence / styling / content) gate on a
-// foundations context — i.e. whether the package needs the MildaContext module.
+// foundations context - i.e. whether the package needs the MildaContext module.
 export function componentUsesContext(ir: ComponentIR): boolean {
   for (const node of Object.values(ir.structure.nodes)) {
     if (predHasContextLeaf(node.presence)) return true
     for (const r of node.states ?? []) if (predHasContextLeaf(r.when)) return true
     const c = node.content
-    if (c && c.kind === 'dynamic') for (const r of c.rules) if (predHasContextLeaf(coercePredicate(r.when))) return true
+    if (c && c.kind === 'dynamic')
+      for (const r of c.rules) if (predHasContextLeaf(coercePredicate(r.when))) return true
   }
   return false
 }
@@ -845,7 +1097,7 @@ export function toIconModule(
   const cdnNote = cdnBacked.length
     ? [
         `// ⚠ NOT fully self-contained: the following glyph(s) load from the Iconify CDN`,
-        `// at runtime — re-pin them in the icon library to vendor their SVG offline:`,
+        `// at runtime - re-pin them in the icon library to vendor their SVG offline:`,
         ...cdnBacked.map((n) => `//   • ${n}`),
         ``,
       ]
@@ -855,7 +1107,7 @@ export function toIconModule(
     ``,
     ...cdnNote,
     `// Every curated icon in the design system, keyed by its name. Generated from the`,
-    `// icon library — each glyph delivers as a self-contained CSS mask, no third-party`,
+    `// icon library - each glyph delivers as a self-contained CSS mask, no third-party`,
     `// icon runtime. Renaming an icon renames its key here.`,
     `export type IconName =`,
     union,
@@ -869,7 +1121,7 @@ export function toIconModule(
     `  className?: string`,
     `  style?: CSSProperties`,
     `  // A meaningful label for a standalone icon. Omit for a decorative icon (the`,
-    `  // default — hidden from assistive tech).`,
+    `  // default - hidden from assistive tech).`,
     `  label?: string`,
     `}`,
     ``,
@@ -915,12 +1167,13 @@ const ICON_BOX_DECLS: StyleDecl[] = [
 
 // The icon's color facet is `fill` (KIND_FACETS.icon). For a masked glyph the fill IS
 // the mask paint (the solid color clipped to the glyph alpha), not a rectangle behind
-// it — so resolve it here and drop the plain `background` the fill facet would emit.
+// it - so resolve it here and drop the plain `background` the fill facet would emit.
 // No fill set → inherit the surrounding text color, matching the editor preview.
-function iconPaintColor(facets: Record<string, string> | undefined): string {
+function iconPaintColor(ctx: EmitCtx, facets: Record<string, string> | undefined): string {
   const fill = facets?.fill
   if (!fill) return 'currentColor'
-  return isRawValue(fill) ? fill : facetCssVar('color', fill) ?? 'currentColor'
+  // Token first, literal second (proposal 0049), the order `facetDecls` reads every other facet in.
+  return ctx.facetVar('color', fill) ?? (couldBeLiteral(fill) ? fill : 'currentColor')
 }
 
 function dropBackground(decls: StyleDecl[]): StyleDecl[] {
@@ -943,6 +1196,7 @@ function iconMaskPaintDecls(url: string, paint = 'currentColor'): StyleDecl[] {
 }
 
 function emitIcon(
+  ctx: EmitCtx,
   node: ComponentNode,
   depth: number,
   keyAttr: string,
@@ -952,19 +1206,20 @@ function emitIcon(
   const key = keyAttr ? ` ${keyAttr}` : ''
   const triggerFor = overlays?.triggers.get(node.id)
   const handlerAttr = emissionHandlers(
+    ctx,
     node,
     triggerFor ? { onClick: [`${triggerFor.setter}((o) => !o)`] } : undefined,
   )
 
   const glyph = staticIconName(node)
   if (glyph) {
-    const url = iconMaskUrl(glyph)
+    const url = iconMaskUrl(ctx, glyph)
     if (url) {
       const glyphRule = (node.states ?? []).find((r) => r.glyph)
-      const selUrl = glyphRule?.glyph ? iconMaskUrl(glyphRule.glyph) : undefined
+      const selUrl = glyphRule?.glyph ? iconMaskUrl(ctx, glyphRule.glyph) : undefined
 
-      if (glyphRule && activeSelectionCond && activeSelection?.itemRole === 'radio') {
-        const cond = activeSelectionCond
+      if (glyphRule && ctx.selectionCond && ctx.selectionAria?.itemRole === 'radio') {
+        const cond = ctx.selectionCond
         const ring = [
           `boxSizing: 'border-box'`,
           `width: '1.05em'`,
@@ -977,12 +1232,12 @@ function emitIcon(
         ]
         return `${pad}<span${key} style={{ ${ring.join(', ')} }}${handlerAttr} aria-hidden />`
       }
-      if (selUrl && activeSelectionCond) {
-        const cond = activeSelectionCond
-        const styleA = styleAttrsFor(node, [
+      if (selUrl && ctx.selectionCond) {
+        const cond = ctx.selectionCond
+        const styleA = styleAttrsFor(ctx, node, [
           ...ICON_BOX_DECLS,
-          ...dropBackground(nodeStyleDecls(node, 'span')),
-          ...iconMaskPaintDecls(url, iconPaintColor(node.facets)),
+          ...dropBackground(nodeStyleDecls(ctx, node, 'span')),
+          ...iconMaskPaintDecls(url, iconPaintColor(ctx, node.facets)),
         ])
         const mask = `${cond} ? 'url("${selUrl}")' : undefined`
         const ink = glyphRule!.facets?.ink
@@ -990,21 +1245,24 @@ function emitIcon(
         if (ink) parts.push(`backgroundColor: ${cond} ? 'var(--ds-color-${ink})' : undefined`)
         return `${pad}<span${key}${styleA} style={{ ${parts.join(', ')} }}${handlerAttr} aria-hidden />`
       }
-      const styleA = styleAttrsFor(node, [
+      const styleA = styleAttrsFor(ctx, node, [
         ...ICON_BOX_DECLS,
-        ...dropBackground(nodeStyleDecls(node, 'span')),
-        ...iconMaskPaintDecls(url, iconPaintColor(node.facets)),
+        ...dropBackground(nodeStyleDecls(ctx, node, 'span')),
+        ...iconMaskPaintDecls(url, iconPaintColor(ctx, node.facets)),
       ])
       return `${pad}<span${key}${styleA}${handlerAttr} aria-hidden />`
     }
   }
   const boundProp = boundIconProp(node)
   if (boundProp) {
-    const styleA = styleAttrsFor(node, [...ICON_BOX_DECLS, ...nodeStyleDecls(node, 'span')])
+    const styleA = styleAttrsFor(ctx, node, [
+      ...ICON_BOX_DECLS,
+      ...nodeStyleDecls(ctx, node, 'span'),
+    ])
 
-    if (!hasIconModule())
+    if (!hasIconModule(ctx))
       return `${pad}{${boundProp} && <span${key}${styleA}${handlerAttr} aria-hidden />}`
-    usesIconComponent = true
+    ctx.usesIconComponent = true
 
     const iconEl = `<Icon name={${boundProp} as IconName}${handlerAttr ? '' : key}${styleA} />`
     return handlerAttr
@@ -1012,59 +1270,69 @@ function emitIcon(
       : `${pad}{${boundProp} && ${iconEl}}`
   }
 
-  const styleA = styleAttrsFor(node, [...ICON_BOX_DECLS, ...nodeStyleDecls(node, 'span')])
+  const styleA = styleAttrsFor(ctx, node, [...ICON_BOX_DECLS, ...nodeStyleDecls(ctx, node, 'span')])
   return `${pad}<span${key}${styleA}${handlerAttr} aria-hidden />`
 }
 
-function iconSpan(node: ComponentNode): string {
+function iconSpan(ctx: EmitCtx, node: ComponentNode): string {
   const glyph = staticIconName(node)
   if (glyph) {
-    const url = iconMaskUrl(glyph)
+    const url = iconMaskUrl(ctx, glyph)
     if (url) {
-      const styleA = styleAttrsFor(node, [
+      const styleA = styleAttrsFor(ctx, node, [
         ...ICON_BOX_DECLS,
-        ...dropBackground(nodeStyleDecls(node, 'span')),
-        ...iconMaskPaintDecls(url, iconPaintColor(node.facets)),
+        ...dropBackground(nodeStyleDecls(ctx, node, 'span')),
+        ...iconMaskPaintDecls(url, iconPaintColor(ctx, node.facets)),
       ])
       return `<span${styleA} aria-hidden />`
     }
   }
-  const styleA = styleAttrsFor(node, [...ICON_BOX_DECLS, ...nodeStyleDecls(node, 'span')])
+  const styleA = styleAttrsFor(ctx, node, [...ICON_BOX_DECLS, ...nodeStyleDecls(ctx, node, 'span')])
   return `<span${styleA} aria-hidden />`
 }
 
-function styleAttrsFor(node: ComponentNode, baseDecls: StyleDecl[]): string {
-  const b = activeSheet.register(node, baseDecls)
+function styleAttrsFor(ctx: EmitCtx, node: ComponentNode, baseDecls: StyleDecl[]): string {
+  const b = ctx.sheet.register(node, baseDecls, layoutParentOf(ctx, node).parent)
   const cls = b.className ? ` className={styles.${b.className}}` : ''
   const data = b.dataAttrs.map((d) => ` ${d.attr}={${bindingExpr(d.prop)}}`).join('')
   return cls + data
 }
 
-function stylesImport(name: string): string[] {
-  return activeSheet.isEmpty ? [] : [`import styles from './${name}.module.css'`]
+function stylesImport(ctx: EmitCtx, name: string): string[] {
+  return ctx.sheet.isEmpty ? [] : [`import styles from './${name}.module.css'`]
 }
 
-function checkedRuleDecls(node: ComponentNode): StyleDecl[] {
+function checkedRuleDecls(ctx: EmitCtx, node: ComponentNode): StyleDecl[] {
   return (node.states ?? [])
     .filter((r) => Object.keys(r.props).length === 0 && r.states.includes('checked'))
-    .flatMap((r) => [...layoutVarDecls(r.layout), ...facetDecls(r.facets, facetCssVar)])
+    .flatMap((r) => [
+      ...layoutVarDecls(r.layout, layoutParentOf(ctx, node)),
+      ...facetDecls(r.facets, ctx.facetVar),
+    ])
 }
 
 const durationVarRef = (id?: string) => facetCssVar('duration', id)
 const easingVarRef = (id?: string) => (id ? cssVarRef(easingVarName(id)) : undefined)
 
 const controlTiming = (t: ControlTransition): StyleDecl[] => {
-  const d = timingTransitionDecl(t.properties, t.duration, t.easing, durationVarRef, easingVarRef)
+  const props = controlTransitionProps(t.aspects)
+  const d = timingTransitionDecl(props, t.duration, t.easing, durationVarRef, easingVarRef)
   return d ? [d] : []
 }
 
-function toggleChangeHandler(node: ComponentNode): string {
+function toggleChangeHandler(ctx: EmitCtx, node: ComponentNode): string {
   const em = (node.emits ?? []).find((e) => e.on === 'change' || e.on === 'activate')
-  const name = em ? emissionEventName(em.eventId) : ''
-  return name ? ` onChange={(e) => on${pascalCase(name)}?.(e.target.checked)}` : ''
+  const name = em ? emissionEventName(ctx, em.eventId) : ''
+  if (!name) return ''
+  const checked = 'e.target.checked'
+  const arg = controlStateArg(ctx, em, checked)
+  // Only bind the event param when the payload actually reads it.
+  const param = arg === checked ? '(e)' : '()'
+  return ` onChange={${param} => on${pascalCase(name)}?.(${arg})}`
 }
 
 function emitCheckboxParts(
+  ctx: EmitCtx,
   root: ComponentNode,
   indicator: ComponentNode,
   glyph: ComponentNode | undefined,
@@ -1077,29 +1345,32 @@ function emitCheckboxParts(
 
   const indicatorBase = [
     ...CHECKBOX_INDICATOR_DECLS,
-    ...layoutVarDecls(indicator.layout),
-    ...facetDecls(indicator.facets, facetCssVar),
+    ...layoutVarDecls(indicator.layout, layoutParentOf(ctx, indicator)),
+    ...facetDecls(indicator.facets, ctx.facetVar),
     ...controlTiming(CHECKBOX_INDICATOR_TRANSITION),
   ]
 
   const glyphName = glyph ? staticIconName(glyph) : undefined
 
   const glyphMaskUrl =
-    (glyphName ? iconMaskUrl(glyphName) : iconMaskUrl('check')) ?? DEFAULT_CHECK_MASK_URL
+    (glyphName ? iconMaskUrl(ctx, glyphName) : iconMaskUrl(ctx, 'check')) ?? DEFAULT_CHECK_MASK_URL
   const glyphTiming = controlTiming(CHECKBOX_GLYPH_TRANSITION)
   const glyphDecls = [
     ...CHECKBOX_GLYPH_DECLS,
     ...(glyph
-      ? dropBackground([...layoutVarDecls(glyph.layout), ...facetDecls(glyph.facets, facetCssVar)])
+      ? dropBackground([
+          ...layoutVarDecls(glyph.layout, layoutParentOf(ctx, glyph)),
+          ...facetDecls(glyph.facets, ctx.facetVar),
+        ])
       : []),
     ...glyphTiming,
-    ...iconMaskPaintDecls(glyphMaskUrl, iconPaintColor(glyph?.facets)),
+    ...iconMaskPaintDecls(glyphMaskUrl, iconPaintColor(ctx, glyph?.facets)),
   ]
-  const cls = activeSheet.checkbox(root, {
+  const cls = ctx.sheet.checkbox(root, {
     rootDecls: CHECKBOX_ROOT_DECLS,
     controlDecls: SR_ONLY_DECLS,
     indicatorBase,
-    indicatorChecked: checkedRuleDecls(indicator),
+    indicatorChecked: checkedRuleDecls(ctx, indicator),
     glyphDecls,
     glyphChecked: CHECKBOX_GLYPH_CHECKED_DECLS,
     focusDecls: CHECKBOX_FOCUS_DECLS,
@@ -1107,12 +1378,12 @@ function emitCheckboxParts(
   })
   const key = keyAttr ? ` ${keyAttr}` : ''
   const checkedA = bind ? ` defaultChecked={${bind}}` : ''
-  const handlerAttr = toggleChangeHandler(root)
+  const handlerAttr = toggleChangeHandler(ctx, root)
 
   const nameExpr = root.a11y?.name ? contentValueExpr(root.a11y.name) : null
   const ariaA = nameExpr
-    ? a11yAttrs({ ...root, a11y: { ...root.a11y, name: undefined } })
-    : a11yAttrs(root)
+    ? a11yAttrs(ctx, { ...root, a11y: { ...root.a11y, name: undefined } })
+    : a11yAttrs(ctx, root)
   const labelLine = nameExpr ? [`${pad}  <span>{${nameExpr}}</span>`] : []
   return [
     `${pad}<label${key} className={styles.${cls.root}}>`,
@@ -1126,12 +1397,14 @@ function emitCheckboxParts(
 }
 
 function emitCheckbox(
+  ctx: EmitCtx,
   node: ComponentNode,
   component: ComponentIR,
   depth: number,
   keyAttr: string,
 ): string {
   return emitCheckboxParts(
+    ctx,
     node,
     node,
     checkboxGlyphChild(node, component.structure.nodes),
@@ -1141,16 +1414,18 @@ function emitCheckbox(
 }
 
 function emitMaterializedCheckbox(
+  ctx: EmitCtx,
   node: ComponentNode,
   indicator: ComponentNode,
   glyph: ComponentNode | undefined,
   depth: number,
   keyAttr: string,
 ): string {
-  return emitCheckboxParts(node, indicator, glyph, depth, keyAttr)
+  return emitCheckboxParts(ctx, node, indicator, glyph, depth, keyAttr)
 }
 
 function emitSwitchParts(
+  ctx: EmitCtx,
   root: ComponentNode,
   track: ComponentNode,
   thumb: ComponentNode | undefined,
@@ -1162,22 +1437,30 @@ function emitSwitchParts(
 
   const trackBase = [
     ...SWITCH_TRACK_DECLS,
-    ...layoutVarDecls(track.layout),
-    ...facetDecls(track.facets, facetCssVar),
+    ...layoutVarDecls(track.layout, layoutParentOf(ctx, track)),
+    ...facetDecls(track.facets, ctx.facetVar),
     ...controlTiming(SWITCH_TRACK_TRANSITION),
   ]
 
   const thumbDecls = [
     ...SWITCH_THUMB_DECLS,
-    ...(thumb ? [...layoutVarDecls(thumb.layout), ...facetDecls(thumb.facets, facetCssVar)] : []),
+    ...(thumb
+      ? [
+          ...layoutVarDecls(thumb.layout, layoutParentOf(ctx, thumb)),
+          ...facetDecls(thumb.facets, ctx.facetVar),
+        ]
+      : []),
     ...controlTiming(SWITCH_THUMB_TRANSITION),
   ]
-  const thumbChecked = [...SWITCH_THUMB_CHECKED_DECLS, ...(thumb ? checkedRuleDecls(thumb) : [])]
-  const cls = activeSheet.switchControl(root, {
+  const thumbChecked = [
+    ...SWITCH_THUMB_CHECKED_DECLS,
+    ...(thumb ? checkedRuleDecls(ctx, thumb) : []),
+  ]
+  const cls = ctx.sheet.switchControl(root, {
     rootDecls: CHECKBOX_ROOT_DECLS,
     controlDecls: SR_ONLY_DECLS,
     trackBase,
-    trackChecked: checkedRuleDecls(track),
+    trackChecked: checkedRuleDecls(ctx, track),
     thumbDecls,
     thumbChecked,
     focusDecls: CHECKBOX_FOCUS_DECLS,
@@ -1185,12 +1468,12 @@ function emitSwitchParts(
   })
   const key = keyAttr ? ` ${keyAttr}` : ''
   const checkedA = bind ? ` defaultChecked={${bind}}` : ''
-  const handlerAttr = toggleChangeHandler(root)
+  const handlerAttr = toggleChangeHandler(ctx, root)
 
   const nameExpr = root.a11y?.name ? contentValueExpr(root.a11y.name) : null
   const ariaA = nameExpr
-    ? a11yAttrs({ ...root, a11y: { ...root.a11y, name: undefined } })
-    : a11yAttrs(root)
+    ? a11yAttrs(ctx, { ...root, a11y: { ...root.a11y, name: undefined } })
+    : a11yAttrs(ctx, root)
   const labelLine = nameExpr ? [`${pad}  <span>{${nameExpr}}</span>`] : []
   return [
     `${pad}<label${key} className={styles.${cls.root}}>`,
@@ -1203,18 +1486,19 @@ function emitSwitchParts(
   ].join('\n')
 }
 
-function emitSwitch(node: ComponentNode, depth: number, keyAttr: string): string {
-  return emitSwitchParts(node, node, undefined, depth, keyAttr)
+function emitSwitch(ctx: EmitCtx, node: ComponentNode, depth: number, keyAttr: string): string {
+  return emitSwitchParts(ctx, node, node, undefined, depth, keyAttr)
 }
 
 function emitMaterializedSwitch(
+  ctx: EmitCtx,
   node: ComponentNode,
   track: ComponentNode,
   thumb: ComponentNode | undefined,
   depth: number,
   keyAttr: string,
 ): string {
-  return emitSwitchParts(node, track, thumb, depth, keyAttr)
+  return emitSwitchParts(ctx, node, track, thumb, depth, keyAttr)
 }
 
 interface OverlayInfo {
@@ -1225,15 +1509,47 @@ interface OverlayInfo {
   kind: 'popover' | 'menu' | 'dialog' | 'sheet'
   modal: boolean
   dismissable: boolean
+  // How the trigger presents it. `context` is secondary activation on the component's own
+  // region (right-click on web, long-press on touch) - the ContextMenu case, where the
+  // anchor is the root rather than a trigger part.
+  openOn: OpenTrigger
+  // A browsable surface announces its WAI-ARIA pattern, and its repeated item announces
+  // the matching one. Both null where the surface is a plain container.
+  surfaceRole?: string
+  itemRole?: string
+  itemNodeId?: string
+  // Set when the surface needs an element handle of its own - today only for the
+  // click-outside dismissal a context menu cannot do without.
+  surfaceRef?: string
+  // What the trigger announces. A hover-presented hint (Tooltip) is not a popup its
+  // trigger expands, so it announces nothing - the same split `planBehavior` draws for
+  // the canvas.
+  announces: { haspopup?: 'menu' | 'dialog'; expanded: boolean }
+}
+
+function overlayAnnounces(
+  kind: OverlayInfo['kind'],
+  openOn: OpenTrigger,
+): OverlayInfo['announces'] {
+  if (openOn === 'hover') return { expanded: false }
+  // A context region is not a control the user can see is expanded - there is nothing to
+  // put the state on. The menu announces itself when it opens instead.
+  if (openOn === 'context') return { expanded: false }
+  if (kind === 'menu') return { haspopup: 'menu', expanded: true }
+  if (kind === 'dialog' || kind === 'sheet') return { haspopup: 'dialog', expanded: true }
+  return { expanded: true }
 }
 interface OverlayPlan {
   surfaces: Map<string, OverlayInfo>
   triggers: Map<string, OverlayInfo>
+  // nodeId -> the ARIA role its repeated item announces.
+  items: Map<string, string>
 }
 
 function planOverlays(component: ComponentIR): OverlayPlan {
   const surfaces = new Map<string, OverlayInfo>()
   const triggers = new Map<string, OverlayInfo>()
+  const items = new Map<string, string>()
   let i = 0
   for (const n of Object.values(component.structure.nodes)) {
     if (!isOverlaySurface(n)) continue
@@ -1254,22 +1570,28 @@ function planOverlays(component: ComponentIR): OverlayPlan {
       kind: mode,
       modal: mode === 'dialog' || mode === 'sheet',
       dismissable,
+      openOn: 'activate',
+      announces: overlayAnnounces(mode, 'activate'),
     }
     surfaces.set(n.id, info)
     if (info.anchorId) triggers.set(info.anchorId, info)
   }
 
   const plan = planBehavior(component)
-  // Fold in only the trigger-owned popup plans this path has always emitted —
-  // inline disclosures, standalone menus, and context-opened surfaces keep their
-  // static generic emission until they get a vertical realization here.
+  // Fold in the popup plans this path realizes: trigger-owned activate-opened surfaces,
+  // and context-opened ones, whose "trigger" is the component's own region. Inline
+  // disclosures and standalone menus keep their static generic emission until they get a
+  // vertical realization here.
+  //
+  // Context menus used to be excluded, which meant their surface never got an open state
+  // and fell through to the static path - so a generated ContextMenu shipped as a
+  // permanently-open menu with no way to open, close or announce itself.
   if (
     plan?.kind === 'disclosure' &&
     plan.surfaceId &&
     !surfaces.has(plan.surfaceId) &&
     plan.surfaceKind !== 'inline' &&
-    !plan.standalone &&
-    plan.openOn !== 'context'
+    !plan.standalone
   ) {
     const idx = i++
     const info: OverlayInfo = {
@@ -1280,11 +1602,25 @@ function planOverlays(component: ComponentIR): OverlayPlan {
       kind: plan.surfaceKind as OverlayInfo['kind'],
       modal: plan.surfaceKind === 'dialog' || plan.surfaceKind === 'sheet',
       dismissable: plan.dismissable ?? true,
+      openOn: plan.openOn,
+      announces: overlayAnnounces(plan.surfaceKind as OverlayInfo['kind'], plan.openOn),
+    }
+    // The ARIA contract, taken from the same plan the canvas renders from. Scoped to the
+    // context case because that is the one this path newly realizes; widening it to the
+    // activate-opened surfaces here would change output they already agree on.
+    if (plan.openOn === 'context' && plan.browsable) {
+      info.surfaceRole = plan.selectable ? 'listbox' : 'menu'
+      info.surfaceRef = `_surf${idx}Ref`
+      if (plan.optionId) {
+        info.itemRole = plan.selectable ? 'option' : 'menuitem'
+        info.itemNodeId = plan.optionId
+        items.set(plan.optionId, info.itemRole)
+      }
     }
     surfaces.set(info.surfaceId, info)
     if (info.anchorId) triggers.set(info.anchorId, info)
   }
-  return { surfaces, triggers }
+  return { surfaces, triggers, items }
 }
 
 interface SelectionInfo {
@@ -1293,19 +1629,63 @@ interface SelectionInfo {
   field: string
   current: string
   setter: string
-  containerRole?: string
-  itemRole?: string
-  checkedAttr?: string
   itemsProp?: string
   event?: string
 }
 
-const SELECTION_ROLES: Record<string, { container: string; item: string; checked: string }> = {
-  ChoiceGroup: { container: 'radiogroup', item: 'radio', checked: 'aria-checked' },
-  Tabs: { container: 'tablist', item: 'tab', checked: 'aria-selected' },
-  List: { container: 'listbox', item: 'option', checked: 'aria-selected' },
+function selectionAriaPlan(component: ComponentIR): SelectionPlan | null {
+  const plan = planBehavior(component)
+  return plan?.kind === 'selection' ? plan : null
 }
-function planSelection(component: ComponentIR): SelectionInfo | null {
+
+// The container's roving-arrow handler exists only when there is a runtime list to rove
+// over: a bound `value` plus a repeat sourced from a prop.
+function usesSelectionNav(ctx: EmitCtx): boolean {
+  return !!ctx.selectionAria && !!ctx.selection?.itemsProp
+}
+
+function selectionContainerAttrs(ctx: EmitCtx, node: ComponentNode): string {
+  const plan = ctx.selectionAria
+  if (!plan || node.id !== plan.containerId) return ''
+  return ` role="${plan.containerRole}"${usesSelectionNav(ctx) ? ' onKeyDown={_onSelKey}' : ''}`
+}
+
+// The picked state of a selection item. With a bound value it is the live comparison
+// against the tracked one; without, there is no runtime selection to compare, so the
+// archetype's birth state stands in - a tablist must announce a selected tab even before
+// anyone wires it (WAI-ARIA), which is exactly what `defaultSelected` records.
+function selectionItemAttrs(
+  ctx: EmitCtx,
+  node: ComponentNode,
+  selItem: SelectionInfo | null,
+): string {
+  const plan = ctx.selectionAria
+  if (!plan) return ''
+  const attrs = (checked: string, tabIndex: string) =>
+    ` role="${plan.itemRole}" ${plan.checkedAttr}={${checked}} tabIndex={${tabIndex}}`
+  if (selItem) {
+    const cond = `${selItem.current} === ${selItem.alias}.${selItem.field}`
+    return attrs(cond, `${cond} ? 0 : -1`)
+  }
+  // A bound selection owns the item element wherever it sits; never emit both.
+  if (ctx.selection || node.id !== plan.itemId) return ''
+  if (node.repeat) {
+    const first = `${node.repeat.itemAlias || 'item'}I === 0`
+    return attrs(plan.defaultSelected != null ? first : 'false', `${first} ? 0 : -1`)
+  }
+  return attrs(String(plan.defaultSelected != null), '0')
+}
+
+// Tabs: the region the tab list controls. The id wiring the preview also emits
+// (aria-controls/aria-labelledby) has no static counterpart here - the IR models ONE panel
+// for a repeat of N tabs, so there is no correct tab to name it after until the panel
+// becomes per-item.
+function selectionPanelAttrs(ctx: EmitCtx, node: ComponentNode): string {
+  const plan = ctx.selectionAria
+  return plan?.panelId && node.id === plan.panelId ? ' role="tabpanel"' : ''
+}
+
+function planSelection(ctx: EmitCtx, component: ComponentIR): SelectionInfo | null {
   const valueProp = (component.contract?.props ?? []).find(
     (p) => p.name === 'value' && (p.type.kind === 'string' || p.type.kind === 'ref'),
   )
@@ -1320,18 +1700,14 @@ function planSelection(component: ComponentIR): SelectionInfo | null {
         e.payload.propName.startsWith(`${alias}.`),
     )
     if (!em || em.payload?.kind !== 'bind') continue
-    const roles = component.archetype ? SELECTION_ROLES[component.archetype] : undefined
     return {
       itemNodeId: n.id,
       alias,
       field: em.payload.propName.slice(alias.length + 1),
       current: '_selected',
       setter: 'setSelValue',
-      containerRole: roles?.container,
-      itemRole: roles?.item,
-      checkedAttr: roles?.checked,
       itemsProp: n.repeat.source.kind === 'prop' ? camelCase(n.repeat.source.propName) : undefined,
-      event: emissionEventName(em.eventId),
+      event: emissionEventName(ctx, em.eventId),
     }
   }
   return null
@@ -1340,11 +1716,14 @@ function planSelection(component: ComponentIR): SelectionInfo | null {
 interface ToggleInfo {
   prop: string
   event?: string
+  // Argument the event handler is called with, already reconciled with its declared payload
+  // ('' when the event declares none). See `eventArg`.
+  eventArg: string
   stateVar: string
   setter: string
   dataState: string
 }
-function planToggle(component: ComponentIR): ToggleInfo | null {
+function planToggle(ctx: EmitCtx, component: ComponentIR): ToggleInfo | null {
   const root = component.structure.nodes[component.structure.rootId]
   if (!root) return null
   const binding = (root.stateBindings ?? []).find(
@@ -1357,9 +1736,13 @@ function planToggle(component: ComponentIR): ToggleInfo | null {
   if (!prop) return null
   const em = (root.emits ?? []).find((e) => e.on === 'activate' || e.on === 'change')
   const id = camelCase(binding.propName)
+  const event = em ? emissionEventName(ctx, em.eventId) : undefined
+  // The toggle's own next state is the natural payload, but only if the event is declared to
+  // take a boolean - otherwise honour what the emission authored (or nothing at all).
   return {
     prop: id,
-    event: em ? emissionEventName(em.eventId) : undefined,
+    event,
+    eventArg: controlStateArg(ctx, em, 'next'),
     stateVar: `_${id}`,
     setter: `_set${pascalCase(binding.propName)}`,
     dataState: binding.state,
@@ -1406,7 +1789,7 @@ interface TextEntryInfo {
   clearId?: string
   clearEvent?: string
 }
-function planTextEntry(component: ComponentIR): TextEntryInfo | null {
+function planTextEntry(ctx: EmitCtx, component: ComponentIR): TextEntryInfo | null {
   const all = Object.values(component.structure.nodes)
   const leaf = (n: ComponentNode) => n.part?.split('.').pop()
   const input = all.find((n) => {
@@ -1421,9 +1804,9 @@ function planTextEntry(component: ComponentIR): TextEntryInfo | null {
   return {
     inputId: input.id,
     prop: camelCase(input.valueBinding.propName),
-    event: em ? emissionEventName(em.eventId) : undefined,
+    event: em ? emissionEventName(ctx, em.eventId) : undefined,
     clearId: clear?.id,
-    clearEvent: clearEm ? emissionEventName(clearEm.eventId) : undefined,
+    clearEvent: clearEm ? emissionEventName(ctx, clearEm.eventId) : undefined,
   }
 }
 
@@ -1463,16 +1846,36 @@ function planSlider(component: ComponentIR): SliderInfo | null {
   }
 }
 
-const INTERACTION_HANDLER: Record<string, string> = {
-  activate: 'onClick',
-  change: 'onChange',
-  input: 'onInput',
-  focus: 'onFocus',
-  blur: 'onBlur',
-  select: 'onClick',
-  open: 'onClick',
-  close: 'onClick',
-  dismiss: 'onClick',
+// A prop typed by a context group selects that context for its own instance (proposal 0001 §3),
+// and the DOM already has the mechanism: the theme stylesheet keys a block of token overrides on
+// `[data-<group>="<context>"]`, so setting the attribute on the component's own root re-points
+// every token that aliases by the group - for this instance, without a single extra CSS rule from
+// this emitter. That is what makes `variant="soft"` repaint a Button rather than being a prop the
+// component destructures and ignores.
+function contextPropAttrs(ctx: EmitCtx, component: ComponentIR): string {
+  return (component.contract?.props ?? [])
+    .flatMap((p) => {
+      if (p.type.kind !== 'context') return []
+      const group = ctx.contextGroups.get(p.type.group)
+      if (!group) return []
+      // A declared default is the system-wide value (0051 §5), so an unset prop falls back to it;
+      // with no default the attribute is simply absent and the ambient selection stands.
+      const fallback = contextLiteral(group, p.default)
+      const expr = fallback ? `${bindingExpr(p.name)} ?? ${fallback}` : bindingExpr(p.name)
+      return [` ${contextDataAttr(group.name)}={${expr}}`]
+    })
+    .join('')
+}
+
+/**
+ * A context value as this target spells it, quoted - or undefined when it names no context of the
+ * group. The IR holds the author's name (`Soft`); the generated API's union is `"soft"`, so a
+ * value written out verbatim would not typecheck against the prop it is passed to.
+ */
+function contextLiteral(group: ContextGroup, value: unknown): string | undefined {
+  const id = contextOfValue(group, value)
+  const name = id ? group.contexts.find((c) => c.id === id)?.name : undefined
+  return name ? JSON.stringify(contextValue(name)) : undefined
 }
 
 const BINDABLE_DATA_STATES = new Set(['selected', 'active', 'error', 'loading', 'success'])
@@ -1503,7 +1906,70 @@ function payloadFallback(t: PropType, def?: PropValue): string | null {
   }
 }
 
-function emissionHandlers(node: ComponentNode, extra?: Record<string, string[]>): string {
+// A value of the declared payload type to pass when the call site has nothing authored to
+// hand over. `payloadFallback` covers the plain kinds; an enum needs a member of its own
+// union, and anything with no neutral literal takes `undefined` (assignable to any/unknown
+// and to an optional param) - the point is to keep the call's ARITY, not to invent data.
+function neutralPayload(t: PropType): string {
+  if (t.kind === 'enum') return t.values.length ? JSON.stringify(t.values[0]) : 'undefined'
+  if (t.kind === 'literal') return JSON.stringify(t.value)
+  return payloadFallback(t) ?? 'undefined'
+}
+
+// What an emission itself authors as its payload ('' when it authors none), with an optional
+// prop's `undefined` filled in so a bound value still satisfies the payload param.
+function authoredPayload(ctx: EmitCtx, em: EventEmission | undefined): string {
+  if (!em?.payload) return ''
+  let expr = contentValueExpr(em.payload)
+  if (em.payload.kind === 'bind') {
+    const p = ctx.props.get(em.payload.propName)
+    if (p && !p.required) {
+      const fb = payloadFallback(p.type, p.default)
+      if (fb !== null) expr = `${expr} ?? ${fb}`
+    }
+  }
+  return expr
+}
+
+// Reconcile a handler call's argument with the signature the interface DECLARES for that
+// event: no declared payload ⇒ no argument, a declared payload ⇒ always one. Emitting a
+// mismatch is not a runtime nicety - it fails `tsc` when the package is released.
+function eventArg(ctx: EmitCtx, eventName: string, authored: string): string {
+  const declared = eventPayloadType(ctx, eventName)
+  if (!declared) return ''
+  return authored || neutralPayload(declared)
+}
+
+// The argument a self-managing control (toggle, text entry, …) hands its change event: the new
+// value it just computed, but only where the declared payload can actually take it. Otherwise
+// the event gets whatever the emission authored, reconciled by `eventArg`.
+function controlEventArg(
+  ctx: EmitCtx,
+  eventName: string | undefined,
+  value: string,
+  kind: PropType['kind'],
+  em?: EventEmission,
+): string {
+  if (!eventName) return ''
+  if (eventPayloadType(ctx, eventName)?.kind === kind) return value
+  return eventArg(ctx, eventName, authoredPayload(ctx, em))
+}
+
+function controlStateArg(ctx: EmitCtx, em: EventEmission | undefined, state: string): string {
+  return controlEventArg(
+    ctx,
+    em ? emissionEventName(ctx, em.eventId) : undefined,
+    state,
+    'boolean',
+    em,
+  )
+}
+
+function emissionHandlers(
+  ctx: EmitCtx,
+  node: ComponentNode,
+  extra?: Record<string, string[]>,
+): string {
   const byHandler = new Map<string, { stmts: string[]; needsEvent: boolean }>()
   const add = (handler: string, stmt: string, needsEvent = false) => {
     const entry = byHandler.get(handler) ?? { stmts: [], needsEvent: false }
@@ -1513,21 +1979,16 @@ function emissionHandlers(node: ComponentNode, extra?: Record<string, string[]>)
   }
   if (extra) for (const [h, stmts] of Object.entries(extra)) for (const s of stmts) add(h, s)
   for (const e of node.emits ?? []) {
-    const handler = INTERACTION_HANDLER[e.on] ?? 'onClick'
-    const fn = `on${pascalCase(emissionEventName(e.eventId))}`
-    let payload = e.payload ? contentValueExpr(e.payload) : ''
+    const handler = reactHandlerProp(e.on)
+    const name = emissionEventName(ctx, e.eventId)
+    const fn = `on${pascalCase(name)}`
+    const payload = authoredPayload(ctx, e)
 
-    if (e.payload?.kind === 'bind') {
-      const p = activeProps.get(e.payload.propName)
-      if (p && !p.required) {
-        const fb = payloadFallback(p.type, p.default)
-        if (fb !== null) payload = `${payload} ?? ${fb}`
-      }
-    }
-
+    // A native-named handler on a DOM-event surface isn't in our interface at all (it comes
+    // from the spread React props), so it keeps forwarding the event object.
     const reuseNative =
-      (activeSurface.domEvents || activeSurface.nativeAttrs) && !payload && NATIVE_HANDLERS.has(fn)
-    add(handler, `${fn}?.(${reuseNative ? 'e' : payload})`, reuseNative)
+      (ctx.surface.domEvents || ctx.surface.nativeAttrs) && !payload && NATIVE_HANDLERS.has(fn)
+    add(handler, `${fn}?.(${reuseNative ? 'e' : eventArg(ctx, name, payload)})`, reuseNative)
   }
   return [...byHandler]
     .map(([h, { stmts, needsEvent }]) => {
@@ -1540,14 +2001,15 @@ function emissionHandlers(node: ComponentNode, extra?: Record<string, string[]>)
 }
 
 function emitChild(
+  ctx: EmitCtx,
   node: ComponentNode,
   component: ComponentIR,
   depth: number,
   overlays?: OverlayPlan,
 ): string | null {
   if (!node.repeat) {
-    const el = emitElement(node, component, depth, '', overlays)
-    return el === null ? null : wrapPresence(node, el, '  '.repeat(depth))
+    const el = emitElement(ctx, node, component, depth, '', overlays)
+    return el === null ? null : wrapPresence(ctx, node, el, '  '.repeat(depth))
   }
 
   const pad = '  '.repeat(depth)
@@ -1555,15 +2017,16 @@ function emitChild(
   const idx = `${alias}I`
 
   const src = repeatItemsExpr(node.repeat.source)
-  const el = emitElement(node, component, depth + 1, `key={${idx}}`, overlays)
+  const el = emitElement(ctx, node, component, depth + 1, `key={${idx}}`, overlays)
   if (el === null) return null
   // Guard inside the map so a per-item presence keyed on the item alias resolves. The
   // arrow returns a bare expression, so no JSX braces around the guard here.
-  const guarded = wrapPresence(node, el, '  '.repeat(depth + 1), false)
+  const guarded = wrapPresence(ctx, node, el, '  '.repeat(depth + 1), false)
   return `${pad}{${src}.map((${alias}, ${idx}) => (\n${guarded}\n${pad}))}`
 }
 
 function childrenJsx(
+  ctx: EmitCtx,
   parent: ComponentNode,
   component: ComponentIR,
   depth: number,
@@ -1579,17 +2042,18 @@ function childrenJsx(
   for (const c of children) {
     if (c === sepNode) continue
     if (interleave && c.repeat) {
-      const s = emitRepeatWithSeparator(c, sepNode!, component, depth, overlays)
+      const s = emitRepeatWithSeparator(ctx, c, sepNode!, component, depth, overlays)
       if (s) out.push(s)
       continue
     }
-    const s = emitChild(c, component, depth, overlays)
+    const s = emitChild(ctx, c, component, depth, overlays)
     if (s !== null) out.push(s)
   }
   return out
 }
 
 function emitRepeatWithSeparator(
+  ctx: EmitCtx,
   node: ComponentNode,
   sep: ComponentNode,
   component: ComponentIR,
@@ -1600,14 +2064,15 @@ function emitRepeatWithSeparator(
   const alias = node.repeat!.itemAlias || 'item'
   const idx = `${alias}I`
   const src = repeatItemsExpr(node.repeat!.source)
-  const el = emitElement(node, component, depth + 1, `key={\`i\${${idx}}\`}`, overlays)
-  const sepEl = emitElement(sep, component, depth + 1, `key={\`s\${${idx}}\`}`, overlays)
+  const el = emitElement(ctx, node, component, depth + 1, `key={\`i\${${idx}}\`}`, overlays)
+  const sepEl = emitElement(ctx, sep, component, depth + 1, `key={\`s\${${idx}}\`}`, overlays)
   if (el === null) return null
-  const guarded = wrapPresence(node, el, '  '.repeat(depth + 1), false)
+  const guarded = wrapPresence(ctx, node, el, '  '.repeat(depth + 1), false)
   return `${pad}{${src}.map((${alias}, ${idx}) => [\n${guarded},\n${pad}  ${idx} < ${src}.length - 1 ? (\n${sepEl}\n${pad}  ) : null,\n${pad}])}`
 }
 
 function emitElement(
+  ctx: EmitCtx,
   node: ComponentNode,
   component: ComponentIR,
   depth: number,
@@ -1618,7 +2083,7 @@ function emitElement(
   const tag = resolveTag(node, component)
 
   const surface = overlays?.surfaces.get(node.id)
-  if (surface && overlays) return emitOverlaySurface(node, component, depth, surface, overlays)
+  if (surface && overlays) return emitOverlaySurface(ctx, node, component, depth, surface, overlays)
 
   if ((node.kind === 'icon' || node.kind === 'content') && !node.facets) return null
 
@@ -1629,51 +2094,58 @@ function emitElement(
 
   if (node.kind === 'instance') {
     const ref = node.instance
-    const target = ref ? componentsById.get(ref.componentId) : undefined
+    const target = ref ? ctx.componentsById.get(ref.componentId) : undefined
     if (!target) return null
     const name = componentName(target)
-    activeInstances.add(name)
+    ctx.instances.add(name)
     const instKey = keyAttr ? ` ${keyAttr}` : ''
     const props = (ref!.props ?? [])
       .filter((p) => p.name)
-      .map((p) => ` ${camelCase(p.name)}={${contentValueExpr(p.value)}}`)
+      .map((p) => ` ${camelCase(p.name)}={${instancePropExpr(ctx, target, p.name, p.value)}}`)
       .join('')
     return `${pad}<${name}${instKey}${props} />`
   }
 
   const toggleVariant = customToggleVariant(node)
-  if (toggleVariant === 'switch') return emitSwitch(node, depth, keyAttr)
-  if (toggleVariant === 'checkbox') return emitCheckbox(node, component, depth, keyAttr)
+  if (toggleVariant === 'switch') return emitSwitch(ctx, node, depth, keyAttr)
+  if (toggleVariant === 'checkbox') return emitCheckbox(ctx, node, component, depth, keyAttr)
 
   const parts = materializedToggleParts(node, component.structure.nodes)
   if (parts?.variant === 'switch' && parts.track)
-    return emitMaterializedSwitch(node, parts.track, parts.thumb, depth, keyAttr)
+    return emitMaterializedSwitch(ctx, node, parts.track, parts.thumb, depth, keyAttr)
   if (parts?.variant === 'checkbox' && parts.indicator)
-    return emitMaterializedCheckbox(node, parts.indicator, parts.glyph, depth, keyAttr)
+    return emitMaterializedCheckbox(ctx, node, parts.indicator, parts.glyph, depth, keyAttr)
 
-  if (node.kind === 'icon') return emitIcon(node, depth, keyAttr, overlays)
+  if (node.kind === 'icon') return emitIcon(ctx, node, depth, keyAttr, overlays)
 
-  const selItem = activeSelection && node.id === activeSelection.itemNodeId ? activeSelection : null
+  const selItem = ctx.selection && node.id === ctx.selection.itemNodeId ? ctx.selection : null
 
   const cursorDecl =
     selItem && tag !== 'button' && tag !== 'a' ? [{ prop: 'cursor', value: 'pointer' }] : []
 
   const srOnlyDecl = node.presentation === 'accessibleName' ? SR_ONLY_DECLS : []
-  const styleA = styleAttrsFor(node, [...nodeStyleDecls(node, tag), ...cursorDecl, ...srOnlyDecl]) + condAttrs(node)
+  const styleA =
+    styleAttrsFor(ctx, node, [...nodeStyleDecls(ctx, node, tag), ...cursorDecl, ...srOnlyDecl]) +
+    condAttrs(ctx, node)
   const key = keyAttr ? ` ${keyAttr}` : ''
+
+  const itemRole = overlays?.items.get(node.id)
+  // -1 rather than 0: the surface owns the tab stop and moves focus between its items,
+  // which is the WAI-ARIA menu pattern (one stop for the whole menu, arrows inside it).
+  const itemRoleA = itemRole ? ` role="${itemRole}" tabIndex={-1}` : ''
 
   const triggerFor = overlays?.triggers.get(node.id)
   const onClickExtra = [
-    ...(triggerFor ? [`${triggerFor.setter}((o) => !o)`] : []),
+    ...(triggerFor && triggerFor.openOn !== 'context' ? [`${triggerFor.setter}((o) => !o)`] : []),
     ...(selItem ? [`${selItem.setter}(${selItem.alias}.${selItem.field})`] : []),
   ]
 
   const stepBtn =
-    activeStepper && (node.id === activeStepper.decId || node.id === activeStepper.incId)
-      ? activeStepper
+    ctx.stepper && (node.id === ctx.stepper.decId || node.id === ctx.stepper.incId)
+      ? ctx.stepper
       : null
 
-  const clearBtn = activeTextEntry && node.id === activeTextEntry.clearId ? activeTextEntry : null
+  const clearBtn = ctx.textEntry && node.id === ctx.textEntry.clearId ? ctx.textEntry : null
   let handlerAttr: string
   if (stepBtn) {
     const ref = `_${stepBtn.prop}Ref.current`
@@ -1691,29 +2163,38 @@ function emitElement(
     handlerAttr = ` onClick={() => { const n = ${bound}; _${stepBtn.prop}Ref.current = n; ${setter}(n)${ev} }}`
   } else if (clearBtn) {
     const setter = `_set${pascalCase(clearBtn.prop)}`
-    const clearEv = clearBtn.clearEvent ? `on${pascalCase(clearBtn.clearEvent)}?.()` : ''
-    const valEv = clearBtn.event ? `on${pascalCase(clearBtn.event)}?.('')` : ''
+    const clearEv = clearBtn.clearEvent
+      ? `on${pascalCase(clearBtn.clearEvent)}?.(${eventArg(ctx, clearBtn.clearEvent, '')})`
+      : ''
+    const valEv = clearBtn.event
+      ? `on${pascalCase(clearBtn.event)}?.(${controlEventArg(ctx, clearBtn.event, "''", 'string')})`
+      : ''
     const calls = [`${setter}('')`, clearEv, valEv].filter(Boolean).join('; ')
     handlerAttr = ` type="button" onClick={() => { ${calls} }}`
   } else {
     handlerAttr = emissionHandlers(
+      ctx,
       node,
       onClickExtra.length ? { onClick: onClickExtra } : undefined,
     )
   }
   const selCond = selItem ? `${selItem.current} === ${selItem.alias}.${selItem.field}` : ''
-  const selA = selItem
-    ? ` data-selected={${selCond} ? '' : undefined}` +
-      (selItem.itemRole
-        ? ` role="${selItem.itemRole}" ${selItem.checkedAttr}={${selCond}} tabIndex={${selCond} ? 0 : -1}`
-        : '')
+  const selA =
+    (selItem ? ` data-selected={${selCond} ? '' : undefined}` : '') +
+    selectionItemAttrs(ctx, node, selItem) +
+    selectionContainerAttrs(ctx, node) +
+    selectionPanelAttrs(ctx, node)
+  // An overlay trigger announces the popup it owns and whether it is showing, the same
+  // pair the canvas gets from `planBehavior`.
+  const trigA = triggerFor?.announces.expanded
+    ? `${triggerFor.announces.haspopup ? ` aria-haspopup="${triggerFor.announces.haspopup}"` : ''} aria-expanded={${triggerFor.state}}`
     : ''
 
-  const labelA = a11yLabelAttrs(node)
-  const ariaA = isNameableControl(node) ? a11yAttrs(node) : ''
+  const labelA = a11yLabelAttrs(ctx, node)
+  const ariaA = isNameableControl(node) ? a11yAttrs(ctx, node) : ''
 
-  if (activeSlider) {
-    const s = activeSlider
+  if (ctx.slider) {
+    const s = ctx.slider
     if (node.id === s.valueId) {
       const inner = `<${tag}${key}${styleA}>{_${s.prop}}</${tag}>`
       return s.hasShowValue ? `${pad}{showValue && ${inner}}` : `${pad}${inner}`
@@ -1728,12 +2209,12 @@ function emitElement(
   }
 
   if (node.kind === 'text') {
-    const textTag = activeA11y.labelFor.has(node.id) ? 'label' : tag
-    return `${pad}<${textTag}${key}${labelA}${styleA}${handlerAttr}>${textContent(node)}</${textTag}>`
+    const textTag = ctx.a11y.labelFor.has(node.id) ? 'label' : tag
+    return `${pad}<${textTag}${key}${labelA}${styleA}${handlerAttr}>${textContent(ctx, node)}</${textTag}>`
   }
   if (node.kind === 'input') {
-    if (activeStepper && node.id === activeStepper.inputId) {
-      const sp = activeStepper
+    if (ctx.stepper && node.id === ctx.stepper.inputId) {
+      const sp = ctx.stepper
       const sv = `_${sp.prop}`
       const setter = `_set${pascalCase(sp.prop)}`
       const ev = sp.event ? `; on${pascalCase(sp.event)}?.(n)` : ''
@@ -1741,12 +2222,14 @@ function emitElement(
       return `${pad}<input${key}${ariaA}${styleA} type="number" value={${sv}} onChange={(e) => { const n = Number(e.target.value); _${sp.prop}Ref.current = n; ${setter}(n)${ev} }}${mm} />`
     }
 
-    if (activeTextEntry && node.id === activeTextEntry.inputId) {
-      const t = activeTextEntry
+    if (ctx.textEntry && node.id === ctx.textEntry.inputId) {
+      const t = ctx.textEntry
       const sv = `_${t.prop}`
       const setter = `_set${pascalCase(t.prop)}`
-      const ev = t.event ? `; on${pascalCase(t.event)}?.(v)` : ''
-      const phExpr = contentExpr(node)
+      const ev = t.event
+        ? `; on${pascalCase(t.event)}?.(${controlEventArg(ctx, t.event, 'v', 'string')})`
+        : ''
+      const phExpr = contentExpr(ctx, node)
       const ph = phExpr !== null ? ` placeholder={${phExpr}}` : ''
       const onCh = ` value={${sv}} onChange={(e) => { const v = e.target.value; ${setter}(v)${ev} }}`
 
@@ -1767,7 +2250,7 @@ function emitElement(
 
     const inputType = inputTypeFor(vtype)
     if (tag === 'textarea' && inputType === 'text') {
-      const phExpr = contentExpr(node)
+      const phExpr = contentExpr(ctx, node)
       const ph = phExpr !== null ? ` placeholder={${phExpr}}` : ''
       const val = bind ? ` defaultValue={${bind}}` : ''
       return `${pad}<textarea${key}${ariaA}${styleA}${handlerAttr}${ph}${val} />`
@@ -1780,7 +2263,7 @@ function emitElement(
         : ` defaultValue={${bind}}`
       : ''
 
-    const phExpr = inputType === 'checkbox' ? null : contentExpr(node)
+    const phExpr = inputType === 'checkbox' ? null : contentExpr(ctx, node)
     const ph = phExpr !== null ? ` placeholder={${phExpr}}` : ''
     const rng =
       vtype?.kind === 'number'
@@ -1797,7 +2280,7 @@ function emitElement(
       const val = bind ? ` value={${bind}}` : ''
       return `${pad}<progress${key}${styleA}${handlerAttr}${max}${val} />`
     }
-    const expr = bind ?? contentExpr(node)
+    const expr = bind ?? contentExpr(ctx, node)
     return `${pad}<output${key}${styleA}${handlerAttr}>${expr !== null ? `{${expr}}` : ''}</output>`
   }
   if (node.kind === 'content') {
@@ -1809,14 +2292,14 @@ function emitElement(
       case 'embed':
         return `${pad}<iframe${key}${styleA}${handlerAttr} title="" />`
       default: {
-        // `bind` — the consumer supplies the URL at runtime; the node's `sample` is a
+        // `bind` - the consumer supplies the URL at runtime; the node's `sample` is a
         // design-time-only preview aid (canvas/docs), never emitted here.
-        // `static` — the image IS the design system's content (logo, illustration);
+        // `static` - the image IS the design system's content (logo, illustration);
         // emits the resolved asset URL directly. NOTE (proposal 0028 §4): this is a
-        // web-native assumption (a literal <img src> URL) — true byte-vendoring, the
+        // web-native assumption (a literal <img src> URL) - true byte-vendoring, the
         // way custom icon SVGs are inlined (0019), is deferred follow-up work, not
         // built here.
-        const resolved = resolveMediaSource(node.mediaSource, activeAssets)
+        const resolved = resolveMediaSource(node.mediaSource, ctx.assets)
         const srcA = resolved
           ? resolved.kind === 'bind'
             ? ` src={${bindingExpr(resolved.propName)}}`
@@ -1829,13 +2312,13 @@ function emitElement(
     }
   }
 
-  const prevSelCond = activeSelectionCond
-  if (selItem) activeSelectionCond = `${selItem.current} === ${selItem.alias}.${selItem.field}`
-  const kids = childrenJsx(node, component, depth + 1, overlays)
-  activeSelectionCond = prevSelCond
+  const prevSelCond = ctx.selectionCond
+  if (selItem) ctx.selectionCond = `${selItem.current} === ${selItem.alias}.${selItem.field}`
+  const kids = childrenJsx(ctx, node, component, depth + 1, overlays)
+  ctx.selectionCond = prevSelCond
 
-  if (activeSlider && node.id === activeSlider.trackId) {
-    const s = activeSlider
+  if (ctx.slider && node.id === ctx.slider.trackId) {
+    const s = ctx.slider
     const cp = '  '.repeat(depth + 1)
     const setter = `_set${pascalCase(s.prop)}`
     const ev = s.event ? `; on${pascalCase(s.event)}?.(n)` : ''
@@ -1856,7 +2339,7 @@ function emitElement(
     const cellTag = node.cell?.header ? 'th' : 'td'
     const scopeA = node.cell?.header && node.cell.scope ? ` scope="${node.cell.scope}"` : ''
     if (!kids.length) {
-      const inline = node.content ? textContent(node) : ''
+      const inline = node.content ? textContent(ctx, node) : ''
       if (inline)
         return `${pad}<${cellTag}${key}${styleA}${handlerAttr}${scopeA}>${inline}</${cellTag}>`
       return `${pad}<${cellTag}${key}${styleA}${handlerAttr}${scopeA} />`
@@ -1872,21 +2355,36 @@ function emitElement(
     return `${pad}<table${key}${styleA}${handlerAttr}>${inner}</table>`
   }
 
-  const elTag = selItem?.itemRole && tag === 'li' ? 'div' : tag
+  const elTag = selItem && ctx.selectionAria && tag === 'li' ? 'div' : tag
   if (!kids.length) {
     // A default slot on a non-text node (a bare trigger meant to wrap whatever the
-    // consumer passes — Tooltip/Popover/Drawer) renders {children} exactly like a
+    // consumer passes - Tooltip/Popover/Drawer) renders {children} exactly like a
     // default-slot label does; `contentExpr` already resolves that regardless of
     // kind, so this only needs to stop gating on `node.content` being set.
-    const inline = node.content || node.slot?.default ? textContent(node) : ''
+    const inline = node.content || node.slot?.default ? textContent(ctx, node) : ''
     if (inline)
-      return `${pad}<${elTag}${key}${labelA}${ariaA}${selA}${styleA}${handlerAttr}>${inline}</${elTag}>`
-    return `${pad}<${elTag}${key}${labelA}${ariaA}${selA}${styleA}${handlerAttr} />`
+      return `${pad}<${elTag}${key}${labelA}${ariaA}${selA}${itemRoleA}${trigA}${styleA}${handlerAttr}>${inline}</${elTag}>`
+    return `${pad}<${elTag}${key}${labelA}${ariaA}${selA}${itemRoleA}${trigA}${styleA}${handlerAttr} />`
   }
-  return `${pad}<${elTag}${key}${labelA}${ariaA}${selA}${styleA}${handlerAttr}>\n${kids.join('\n')}\n${pad}</${elTag}>`
+  return `${pad}<${elTag}${key}${labelA}${ariaA}${selA}${itemRoleA}${trigA}${styleA}${handlerAttr}>\n${kids.join('\n')}\n${pad}</${elTag}>`
+}
+
+/** The roving-cursor handler a browsable surface installs, named per overlay. */
+const navName = (info: OverlayInfo): string => `_nav${info.state.replace('open', '')}`
+
+// The DOM interface a ref on the overlay surface must be typed against. The surface is not
+// always a `div` - a browsable context menu lowers to `ul`, and a `RefObject<HTMLDivElement>`
+// on a `<ul>` is a type error in the SHIPPED package. `HTMLElementTagNameMap` is the DOM lib's
+// own tag -> interface answer, so this cannot drift from whatever `resolveTag` decided; `div`
+// keeps its plain name because that is the overwhelmingly common case and it reads better.
+function surfaceRefType(component: ComponentIR, info: OverlayInfo): string {
+  const node = component.structure.nodes[info.surfaceId]
+  const tag = node ? resolveTag(node, component) : 'div'
+  return tag === 'div' ? 'HTMLDivElement' : `HTMLElementTagNameMap['${tag}']`
 }
 
 function emitOverlaySurface(
+  ctx: EmitCtx,
   node: ComponentNode,
   component: ComponentIR,
   depth: number,
@@ -1897,13 +2395,13 @@ function emitOverlaySurface(
   const tag = resolveTag(node, component)
   const innerPad = '  '.repeat(depth + 1)
   const kids = childrenOf(node, component)
-    .map((k) => emitChild(k, component, depth + (info.modal ? 3 : 2), overlays))
+    .map((k) => emitChild(ctx, k, component, depth + (info.modal ? 3 : 2), overlays))
     .filter((s): s is string => s !== null)
   const body = kids.length ? `\n${kids.join('\n')}\n` : ''
 
-  const surfStyle = styleAttrsFor(node, [
+  const surfStyle = styleAttrsFor(ctx, node, [
     ...surfacePositionDecls(info.kind),
-    ...nodeStyleDecls(node, tag),
+    ...nodeStyleDecls(ctx, node, tag),
   ])
 
   if (info.modal) {
@@ -1920,7 +2418,12 @@ function emitOverlaySurface(
     ].join('\n')
   }
 
-  return `${pad}{${info.state} && (\n${innerPad}<${tag}${surfStyle}>${body}${body ? innerPad : ''}</${tag}>\n${pad})}`
+  const roleA = info.surfaceRole ? ` role="${info.surfaceRole}"` : ''
+  const refA = info.surfaceRef ? ` ref={${info.surfaceRef}}` : ''
+  const navA = info.surfaceRef
+    ? ` tabIndex={-1} onKeyDown={${info.surfaceRef ? navName(info) : ''}}`
+    : ''
+  return `${pad}{${info.state} && (\n${innerPad}<${tag}${refA}${surfStyle}${roleA}${navA}>${body}${body ? innerPad : ''}</${tag}>\n${pad})}`
 }
 
 function styleAttr(decls: StyleDecl[]): string {
@@ -1933,53 +2436,67 @@ const SURFACE_BASE: StyleDecl[] = [
   { prop: 'flexDirection', value: 'column' },
 ]
 
-function emitDisclosure(component: ComponentIR, plan: DisclosurePlan): string {
+function emitDisclosure(ctx: EmitCtx, component: ComponentIR, plan: DisclosurePlan): string {
   const name = componentName(component)
   const nodes = component.structure.nodes
   const node = (id?: string) => (id ? nodes[id] : undefined)
   const tagFor = (n: ComponentNode) => resolveTag(n, component)
-  const facetStyle = (n: ComponentNode) => nodeStyleDecls(n, tagFor(n))
+  const facetStyle = (n: ComponentNode) => nodeStyleDecls(ctx, n, tagFor(n))
 
+  const root = nodes[component.structure.rootId]
   const trigger = node(plan.triggerId)!
   const surface = node(plan.surfaceId)!
   const backdrop = node(plan.backdropId)
 
+  // The root is a real node an author can select and paint on the canvas, so it needs an
+  // element to carry that styling. This used to return a bare fragment (trigger + portal)
+  // and silently drop everything the root wore. When the archetype has no trigger part of
+  // its own the root IS the trigger, and wrapping would emit it twice.
+  const rootIsTrigger = root.id === trigger.id
+  const rootStyle = rootIsTrigger
+    ? ''
+    : styleAttrsFor(ctx, root, [
+        ...anchorDecls(plan.surfaceKind),
+        ...nodeStyleDecls(ctx, root, tagFor(root)),
+      ])
+  const rootTag = tagFor(root)
+
   const trigLines = childrenOf(trigger, component)
     .map((k) => {
       if (k.id === plan.triggerLabelId) {
-        return `        <${tagFor(k)}${styleAttrsFor(k, facetStyle(k))}>{trigger}</${tagFor(k)}>`
+        return `        <${tagFor(k)}${styleAttrsFor(ctx, k, facetStyle(k))}>{trigger}</${tagFor(k)}>`
       }
-      return emitChild(k, component, 4)
+      return emitChild(ctx, k, component, 4)
     })
     .filter((s): s is string => s !== null)
   const trigInner = trigLines.length ? `\n${trigLines.join('\n')}\n      ` : '{trigger}'
 
   const surfLines = childrenOf(surface, component)
     .map((k) => {
-      const ks = styleAttrsFor(k, facetStyle(k))
+      const ks = styleAttrsFor(ctx, k, facetStyle(k))
       const tag = tagFor(k)
       if (k.id === plan.titleId) return `            <${tag}${ks}>{title}</${tag}>`
       if (k.id === plan.contentId) return `            <${tag}${ks}>{children}</${tag}>`
       if (k.id === plan.closeId) {
         return `            <button${ks} onClick={() => change(false)} aria-label="Close">×</button>`
       }
-      return emitChild(k, component, 6)
+      return emitChild(ctx, k, component, 6)
     })
     .filter((s): s is string => s !== null)
   const surfInner = surfLines.length ? `\n${surfLines.join('\n')}\n          ` : ''
 
-  const surfStyle = styleAttrsFor(surface, [
+  const surfStyle = styleAttrsFor(ctx, surface, [
     ...surfacePositionDecls(plan.surfaceKind),
     ...SURFACE_BASE,
     ...facetStyle(surface),
   ])
 
   const backStyle = backdrop
-    ? styleAttrsFor(backdrop, [...backdropDecls(plan.surfaceKind), ...facetStyle(backdrop)])
+    ? styleAttrsFor(ctx, backdrop, [...backdropDecls(plan.surfaceKind), ...facetStyle(backdrop)])
     : styleAttr(backdropDecls(plan.surfaceKind))
   const backDismiss = plan.dismissable ? ' onClick={() => change(false)}' : ''
 
-  const trigAttr = styleAttrsFor(trigger, facetStyle(trigger))
+  const trigAttr = styleAttrsFor(ctx, trigger, facetStyle(trigger))
 
   const propLines = [
     '  open?: boolean',
@@ -2028,7 +2545,7 @@ function emitDisclosure(component: ComponentIR, plan: DisclosurePlan): string {
     ``,
     reactImport,
     `import { createPortal } from 'react-dom'`,
-    ...stylesImport(name),
+    ...stylesImport(ctx, name),
     ``,
     `export interface ${name}Props {`,
     ...propLines,
@@ -2041,8 +2558,10 @@ function emitDisclosure(component: ComponentIR, plan: DisclosurePlan): string {
     dismissEffect,
     ``,
     `  return (`,
-    `    <>`,
-    `      <${tagFor(trigger)}${trigAttr} onClick={() => change(true)}>${trigInner}</${tagFor(trigger)}>`,
+    rootIsTrigger ? `    <>` : `    <${rootTag}${rootStyle}>`,
+    // The trigger announces the popup it owns and whether it is showing - the same pair
+    // `planBehavior` gives the canvas for a modal disclosure.
+    `      <${tagFor(trigger)}${trigAttr} aria-haspopup="dialog" aria-expanded={isOpen} onClick={() => change(true)}>${trigInner}</${tagFor(trigger)}>`,
     `      {isOpen && createPortal(`,
     `        <>`,
     `          <div${backStyle}${backDismiss} />`,
@@ -2050,19 +2569,20 @@ function emitDisclosure(component: ComponentIR, plan: DisclosurePlan): string {
     `        </>,`,
     `        document.body,`,
     `      )}`,
-    `    </>`,
+    rootIsTrigger ? `    </>` : `    </${rootTag}>`,
     `  )`,
     `}`,
     ``,
   ].join('\n')
 }
 
-function emitSelect(component: ComponentIR, plan: DisclosurePlan): string {
+function emitSelect(ctx: EmitCtx, component: ComponentIR, plan: DisclosurePlan): string {
   const name = componentName(component)
   const nodes = component.structure.nodes
   const node = (id?: string) => (id ? nodes[id] : undefined)
   const tagFor = (n: ComponentNode) => resolveTag(n, component)
-  const sa = (n?: ComponentNode) => (n ? styleAttrsFor(n, nodeStyleDecls(n, tagFor(n))) : '')
+  const sa = (n?: ComponentNode) =>
+    n ? styleAttrsFor(ctx, n, nodeStyleDecls(ctx, n, tagFor(n))) : ''
 
   const root = nodes[component.structure.rootId]
   const trigger = node(plan.triggerId)!
@@ -2073,14 +2593,14 @@ function emitSelect(component: ComponentIR, plan: DisclosurePlan): string {
   const check = node(plan.optionCheckId)
   const label = node(plan.optionLabelId)
 
-  const rootStyle = styleAttrsFor(root, [
+  const rootStyle = styleAttrsFor(ctx, root, [
     ...anchorDecls(plan.surfaceKind),
-    ...nodeStyleDecls(root, 'div'),
+    ...nodeStyleDecls(ctx, root, 'div'),
   ])
-  const surfStyle = styleAttrsFor(surface, [
+  const surfStyle = styleAttrsFor(ctx, surface, [
     ...surfacePositionDecls(plan.surfaceKind),
     ...SURFACE_BASE,
-    ...nodeStyleDecls(surface, tagFor(surface)),
+    ...nodeStyleDecls(ctx, surface, tagFor(surface)),
   ])
 
   const trigAttr = sa(trigger)
@@ -2089,10 +2609,10 @@ function emitSelect(component: ComponentIR, plan: DisclosurePlan): string {
   const valueLine = value
     ? `        <${tagFor(value)}${sa(value)}>{selected ? selected.label : placeholder}</${tagFor(value)}>`
     : `        {selected ? selected.label : placeholder}`
-  const indicatorLine = indicator ? `\n        ${iconSpan(indicator)}` : ''
+  const indicatorLine = indicator ? `\n        ${iconSpan(ctx, indicator)}` : ''
 
   const checkLine = check
-    ? `\n              ${iconSpan(check).replace(
+    ? `\n              ${iconSpan(ctx, check).replace(
         ' aria-hidden />',
         ` style={{ visibility: option.value === value ? undefined : 'hidden' }} aria-hidden />`,
       )}`
@@ -2105,7 +2625,7 @@ function emitSelect(component: ComponentIR, plan: DisclosurePlan): string {
     `'use client'`,
     ``,
     `import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react'`,
-    ...stylesImport(name),
+    ...stylesImport(ctx, name),
     ``,
     `export interface ${name}Option {`,
     `  value: string`,
@@ -2178,12 +2698,13 @@ function emitSelect(component: ComponentIR, plan: DisclosurePlan): string {
   ].join('\n')
 }
 
-function emitCombobox(component: ComponentIR, plan: DisclosurePlan): string {
+function emitCombobox(ctx: EmitCtx, component: ComponentIR, plan: DisclosurePlan): string {
   const name = componentName(component)
   const nodes = component.structure.nodes
   const node = (id?: string) => (id ? nodes[id] : undefined)
   const tagFor = (n: ComponentNode) => resolveTag(n, component)
-  const sa = (n?: ComponentNode) => (n ? styleAttrsFor(n, nodeStyleDecls(n, tagFor(n))) : '')
+  const sa = (n?: ComponentNode) =>
+    n ? styleAttrsFor(ctx, n, nodeStyleDecls(ctx, n, tagFor(n))) : ''
 
   const root = nodes[component.structure.rootId]
   const control = node(plan.triggerId)!
@@ -2192,14 +2713,14 @@ function emitCombobox(component: ComponentIR, plan: DisclosurePlan): string {
   const label = node(plan.optionLabelId)
   const placeholder = (component.contract?.props ?? []).some((p) => p.name === 'placeholder')
 
-  const rootStyle = styleAttrsFor(root, [
+  const rootStyle = styleAttrsFor(ctx, root, [
     ...anchorDecls(plan.surfaceKind),
-    ...nodeStyleDecls(root, 'div'),
+    ...nodeStyleDecls(ctx, root, 'div'),
   ])
-  const surfStyle = styleAttrsFor(surface, [
+  const surfStyle = styleAttrsFor(ctx, surface, [
     ...surfacePositionDecls(plan.surfaceKind),
     ...SURFACE_BASE,
-    ...nodeStyleDecls(surface, tagFor(surface)),
+    ...nodeStyleDecls(ctx, surface, tagFor(surface)),
   ])
   const controlAttr = sa(control)
   const optionAttr = sa(option)
@@ -2213,7 +2734,7 @@ function emitCombobox(component: ComponentIR, plan: DisclosurePlan): string {
     `'use client'`,
     ``,
     `import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react'`,
-    ...stylesImport(name),
+    ...stylesImport(ctx, name),
     ``,
     `export interface ${name}Item {`,
     `  value: string`,
@@ -2276,12 +2797,13 @@ function emitCombobox(component: ComponentIR, plan: DisclosurePlan): string {
 // target computes an identical calendar. This function only wires React state,
 // Intl labels, and per-anatomy styling, and converts between the calendar's
 // canonical YMD and the project's date representation at the boundary (v1: isoDate).
-function emitDatePicker(component: ComponentIR, options: EmitOptions): string {
+function emitDatePicker(ctx: EmitCtx, component: ComponentIR, options: EmitOptions): string {
   const name = componentName(component)
   const nodes = component.structure.nodes
   const root = nodes[component.structure.rootId]
   const tagFor = (n: ComponentNode) => resolveTag(n, component)
-  const sa = (n?: ComponentNode) => (n ? styleAttrsFor(n, nodeStyleDecls(n, tagFor(n))) : '')
+  const sa = (n?: ComponentNode) =>
+    n ? styleAttrsFor(ctx, n, nodeStyleDecls(ctx, n, tagFor(n))) : ''
   const leaf = (n: ComponentNode) => n.part?.split('.').pop()
   const byPart = (p: string) => Object.values(nodes).find((n) => leaf(n) === p)
 
@@ -2300,12 +2822,15 @@ function emitDatePicker(component: ComponentIR, options: EmitOptions): string {
   const dayNode = byPart('day')
   const labelNode = byPart('label')
 
-  const rootStyle = styleAttrsFor(root, [...anchorDecls('popover'), ...nodeStyleDecls(root, 'div')])
+  const rootStyle = styleAttrsFor(ctx, root, [
+    ...anchorDecls('popover'),
+    ...nodeStyleDecls(ctx, root, 'div'),
+  ])
   const surfStyle = surface
-    ? styleAttrsFor(surface, [
+    ? styleAttrsFor(ctx, surface, [
         ...surfacePositionDecls('popover'),
         ...SURFACE_BASE,
-        ...nodeStyleDecls(surface, tagFor(surface)),
+        ...nodeStyleDecls(ctx, surface, tagFor(surface)),
       ])
     : ''
 
@@ -2327,7 +2852,7 @@ function emitDatePicker(component: ComponentIR, options: EmitOptions): string {
   const prevTag = prev ? tagFor(prev) : 'button'
   const nextTag = next ? tagFor(next) : 'button'
 
-  const iconLine = iconNode ? '\n        ' + iconSpan(iconNode) : ''
+  const iconLine = iconNode ? '\n        ' + iconSpan(ctx, iconNode) : ''
   const labelInner = labelNode
     ? '<' + labelTag + sa(labelNode) + '>{cell.date.day}</' + labelTag + '>'
     : '{cell.date.day}'
@@ -2378,7 +2903,8 @@ function emitDatePicker(component: ComponentIR, options: EmitOptions): string {
   const repDef = REP[rep]
 
   // Range value shape: object { start, end } (default) or positional tuple.
-  const rangeType = rangeShape === 'tuple' ? `[DateValue, DateValue]` : `{ start: DateValue; end: DateValue }`
+  const rangeType =
+    rangeShape === 'tuple' ? `[DateValue, DateValue]` : `{ start: DateValue; end: DateValue }`
   const buildRange = (s: string, e: string) =>
     // The tuple literal needs a cast: TS widens `[a, b]` to `DateValue[]`, not the
     // `[DateValue, DateValue]` the value/state expect.
@@ -2400,7 +2926,7 @@ function emitDatePicker(component: ComponentIR, options: EmitOptions): string {
     ``,
     `import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'`,
     importCore,
-    ...stylesImport(name),
+    ...stylesImport(ctx, name),
     ``,
     `// Date-value representation: ${rep}. Dates cross the boundary as this type; the`,
     `// calendar core always works in canonical { year, month, day } (1-12 month).`,
@@ -2551,12 +3077,13 @@ function emitDatePicker(component: ComponentIR, options: EmitOptions): string {
 // slot generation lives there so every framework target computes an identical list.
 // This wires React state, Intl labels, per-anatomy styling, and converts between the
 // core's canonical { hour, minute } and the project's time representation (v1 default: isoTime).
-function emitTimePicker(component: ComponentIR, options: EmitOptions): string {
+function emitTimePicker(ctx: EmitCtx, component: ComponentIR, options: EmitOptions): string {
   const name = componentName(component)
   const nodes = component.structure.nodes
   const root = nodes[component.structure.rootId]
   const tagFor = (n: ComponentNode) => resolveTag(n, component)
-  const sa = (n?: ComponentNode) => (n ? styleAttrsFor(n, nodeStyleDecls(n, tagFor(n))) : '')
+  const sa = (n?: ComponentNode) =>
+    n ? styleAttrsFor(ctx, n, nodeStyleDecls(ctx, n, tagFor(n))) : ''
   const leaf = (n: ComponentNode) => n.part?.split('.').pop()
   const byPart = (p: string) => Object.values(nodes).find((n) => leaf(n) === p)
 
@@ -2575,15 +3102,18 @@ function emitTimePicker(component: ComponentIR, options: EmitOptions): string {
   const valueTag = valueNode ? tagFor(valueNode) : 'span'
   const labelTag = labelNode ? tagFor(labelNode) : 'span'
 
-  const rootStyle = styleAttrsFor(root, [...anchorDecls('popover'), ...nodeStyleDecls(root, 'div')])
+  const rootStyle = styleAttrsFor(ctx, root, [
+    ...anchorDecls('popover'),
+    ...nodeStyleDecls(ctx, root, 'div'),
+  ])
   const surfStyle = surface
-    ? styleAttrsFor(surface, [
+    ? styleAttrsFor(ctx, surface, [
         ...surfacePositionDecls('popover'),
         ...SURFACE_BASE,
-        ...nodeStyleDecls(surface, tagFor(surface)),
+        ...nodeStyleDecls(ctx, surface, tagFor(surface)),
       ])
     : ''
-  const iconLine = iconNode ? '\n        ' + iconSpan(iconNode) : ''
+  const iconLine = iconNode ? '\n        ' + iconSpan(ctx, iconNode) : ''
   const labelInner = labelNode
     ? '<' + labelTag + sa(labelNode) + '>{label}</' + labelTag + '>'
     : '{label}'
@@ -2623,7 +3153,7 @@ function emitTimePicker(component: ComponentIR, options: EmitOptions): string {
     ``,
     `import { useEffect, useRef, useState, type ReactNode } from 'react'`,
     `import { buildTimeList, type HM } from '${options.behaviorDelivery === 'package' ? options.behaviorPackage || BEHAVIOR_PACKAGE_DEFAULT : './timepicker'}'`,
-    ...stylesImport(name),
+    ...stylesImport(ctx, name),
     ``,
     `// Time-value representation: ${rep}. The core works in canonical { hour, minute } (24h).`,
     `type TimeValue = ${repDef.type}`,
@@ -2715,12 +3245,13 @@ function emitTimePicker(component: ComponentIR, options: EmitOptions): string {
 // eyedropper, preset swatches, and popover-vs-inline layout. The emitted VALUE TYPE is
 // a separate project/publish decision (options.colorRepresentation, 0015); we convert
 // the canonical working color to it at the boundary.
-function emitColorPicker(component: ComponentIR, options: EmitOptions): string {
+function emitColorPicker(ctx: EmitCtx, component: ComponentIR, options: EmitOptions): string {
   const name = componentName(component)
   const nodes = component.structure.nodes
   const root = nodes[component.structure.rootId]
   const tagFor = (n: ComponentNode) => resolveTag(n, component)
-  const sa = (n?: ComponentNode) => (n ? styleAttrsFor(n, nodeStyleDecls(n, tagFor(n))) : '')
+  const sa = (n?: ComponentNode) =>
+    n ? styleAttrsFor(ctx, n, nodeStyleDecls(ctx, n, tagFor(n))) : ''
   const leaf = (n: ComponentNode) => n.part?.split('.').pop()
   const byPart = (p: string) => Object.values(nodes).find((n) => leaf(n) === p)
 
@@ -2735,8 +3266,12 @@ function emitColorPicker(component: ComponentIR, options: EmitOptions): string {
   const triggerNode = byPart('trigger')
   // Two parts share the leaf `swatch` (trigger.swatch and surface.swatches.swatch);
   // disambiguate by the full dotted path.
-  const swatchNode = Object.values(nodes).find((n) => leaf(n) === 'swatch' && n.part?.includes('trigger'))
-  const presetNode = Object.values(nodes).find((n) => leaf(n) === 'swatch' && n.part?.includes('swatches'))
+  const swatchNode = Object.values(nodes).find(
+    (n) => leaf(n) === 'swatch' && n.part?.includes('trigger'),
+  )
+  const presetNode = Object.values(nodes).find(
+    (n) => leaf(n) === 'swatch' && n.part?.includes('swatches'),
+  )
   const valueNode = byPart('value')
   const surface = byPart('surface')
   const areaNode = byPart('area')
@@ -2857,18 +3392,54 @@ function emitColorPicker(component: ComponentIR, options: EmitOptions): string {
     }
     if (fmt === 'hsl') {
       const rows = [
-        num('Hue', 0, 360, 'Math.round(hsl.h)', commitCall(`${A.fromRgb}(hslToRgb({ ...hsl, h: n }))`)),
-        num('Saturation', 0, 100, 'Math.round(hsl.s * 100)', commitCall(`${A.fromRgb}(hslToRgb({ ...hsl, s: n / 100 }))`)),
-        num('Lightness', 0, 100, 'Math.round(hsl.l * 100)', commitCall(`${A.fromRgb}(hslToRgb({ ...hsl, l: n / 100 }))`)),
+        num(
+          'Hue',
+          0,
+          360,
+          'Math.round(hsl.h)',
+          commitCall(`${A.fromRgb}(hslToRgb({ ...hsl, h: n }))`),
+        ),
+        num(
+          'Saturation',
+          0,
+          100,
+          'Math.round(hsl.s * 100)',
+          commitCall(`${A.fromRgb}(hslToRgb({ ...hsl, s: n / 100 }))`),
+        ),
+        num(
+          'Lightness',
+          0,
+          100,
+          'Math.round(hsl.l * 100)',
+          commitCall(`${A.fromRgb}(hslToRgb({ ...hsl, l: n / 100 }))`),
+        ),
       ]
       if (withAlpha) rows.push(alphaInput)
       return rows.join('\n')
     }
     // hsb (=== HSV channels)
     const rows = [
-      num('Hue', 0, 360, 'Math.round(hsb.h)', commitCall(`${A.fromRgb}(hsvToRgb({ ...hsb, h: n }))`)),
-      num('Saturation', 0, 100, 'Math.round(hsb.s * 100)', commitCall(`${A.fromRgb}(hsvToRgb({ ...hsb, s: n / 100 }))`)),
-      num('Brightness', 0, 100, 'Math.round(hsb.v * 100)', commitCall(`${A.fromRgb}(hsvToRgb({ ...hsb, v: n / 100 }))`)),
+      num(
+        'Hue',
+        0,
+        360,
+        'Math.round(hsb.h)',
+        commitCall(`${A.fromRgb}(hsvToRgb({ ...hsb, h: n }))`),
+      ),
+      num(
+        'Saturation',
+        0,
+        100,
+        'Math.round(hsb.s * 100)',
+        commitCall(`${A.fromRgb}(hsvToRgb({ ...hsb, s: n / 100 }))`),
+      ),
+      num(
+        'Brightness',
+        0,
+        100,
+        'Math.round(hsb.v * 100)',
+        commitCall(`${A.fromRgb}(hsvToRgb({ ...hsb, v: n / 100 }))`),
+      ),
     ]
     if (withAlpha) rows.push(alphaInput)
     return rows.join('\n')
@@ -2956,9 +3527,11 @@ function emitColorPicker(component: ComponentIR, options: EmitOptions): string {
     ``,
     `import { useEffect, ${inline ? '' : 'useRef, '}useState, type PointerEvent as ReactPointerEvent } from 'react'`,
     `import { ${coreImports.join(', ')}, type ${A.W} } from '${
-      options.behaviorDelivery === 'package' ? options.behaviorPackage || BEHAVIOR_PACKAGE_DEFAULT : './color'
+      options.behaviorDelivery === 'package'
+        ? options.behaviorPackage || BEHAVIOR_PACKAGE_DEFAULT
+        : './color'
     }'`,
-    ...stylesImport(name),
+    ...stylesImport(ctx, name),
     ``,
     `type Working = ${A.W}`,
     multiFormat ? `type Format = ${formats.map((f) => `'${f}'`).join(' | ')}` : ``,
@@ -2971,7 +3544,9 @@ function emitColorPicker(component: ComponentIR, options: EmitOptions): string {
     `  value?: ColorValue | null`,
     `  defaultValue?: ColorValue | null`,
     `  onValueChange?: (value: ColorValue) => void`,
-    ...(cfg.swatches ? [`  /** Preset colors shown as clickable swatches. */`, `  presets?: ColorValue[]`] : []),
+    ...(cfg.swatches
+      ? [`  /** Preset colors shown as clickable swatches. */`, `  presets?: ColorValue[]`]
+      : []),
     `}`,
     ``,
     `export function ${name}({ value: valueProp, defaultValue, onValueChange${cfg.swatches ? ', presets' : ''} }: ${name}Props) {`,
@@ -2981,7 +3556,9 @@ function emitColorPicker(component: ComponentIR, options: EmitOptions): string {
     `  const _init = deserialize(value)`,
     `  const [c, setC] = useState<Working>(() => _init?.c ?? ${A.def})`,
     ...(withAlpha ? [`  const [alpha, setAlpha] = useState<number>(() => _init?.a ?? 1)`] : []),
-    ...(multiFormat ? [`  const [format, setFormat] = useState<Format>('${cfg.defaultFormat}')`] : []),
+    ...(multiFormat
+      ? [`  const [format, setFormat] = useState<Format>('${cfg.defaultFormat}')`]
+      : []),
     ...(inline ? [] : [`  const ref = useRef<HTMLDivElement>(null)`]),
     `  const model = ${A.build}(c)`,
     ...derived,
@@ -3049,12 +3626,12 @@ function emitColorPicker(component: ComponentIR, options: EmitOptions): string {
     `  return (`,
     ...(inline
       ? [
-          `    <${surfTag}${styleAttrsFor(surface ?? root, [...SURFACE_BASE, ...nodeStyleDecls(surface ?? root, surfTag)])} role="group" aria-label="Color picker">`,
+          `    <${surfTag}${styleAttrsFor(ctx, surface ?? root, [...SURFACE_BASE, ...nodeStyleDecls(ctx, surface ?? root, surfTag)])} role="group" aria-label="Color picker">`,
           ...panel.map((l) => l.replace(/^ {8}/, '      ')),
           `    </${surfTag}>`,
         ]
       : [
-          `    <div ref={ref}${styleAttrsFor(root, [...anchorDecls('popover'), ...nodeStyleDecls(root, 'div')])}>`,
+          `    <div ref={ref}${styleAttrsFor(ctx, root, [...anchorDecls('popover'), ...nodeStyleDecls(ctx, root, 'div')])}>`,
           `      <${trigTag}${sa(triggerNode)} type="button" aria-haspopup="dialog" aria-expanded={open} onClick={() => setOpen((o) => !o)}>`,
           swatchNode
             ? `        <${tagFor(swatchNode)}${sa(swatchNode)} aria-hidden style={{ background: model.hex }} />`
@@ -3062,7 +3639,7 @@ function emitColorPicker(component: ComponentIR, options: EmitOptions): string {
           `        <${valueTag}${sa(valueNode)}>{model.hex}</${valueTag}>`,
           `      </${trigTag}>`,
           `      {open && (`,
-          `        <${surfTag}${styleAttrsFor(surface ?? root, [...surfacePositionDecls('popover'), ...SURFACE_BASE, ...nodeStyleDecls(surface ?? root, surfTag)])} role="dialog">`,
+          `        <${surfTag}${styleAttrsFor(ctx, surface ?? root, [...surfacePositionDecls('popover'), ...SURFACE_BASE, ...nodeStyleDecls(ctx, surface ?? root, surfTag)])} role="dialog">`,
           ...panel,
           `        </${surfTag}>`,
           `      )}`,
@@ -3076,6 +3653,7 @@ function emitColorPicker(component: ComponentIR, options: EmitOptions): string {
   return lines.filter((l) => l !== '').join('\n') + '\n'
 }
 function emitMenu(
+  ctx: EmitCtx,
   component: ComponentIR,
   plan: DisclosurePlan,
   sharedTypes: SharedType[] = [],
@@ -3084,8 +3662,8 @@ function emitMenu(
   const nodes = component.structure.nodes
   const node = (id?: string) => (id ? nodes[id] : undefined)
   const tagFor = (n: ComponentNode) => resolveTag(n, component)
-  const facetStyle = (n: ComponentNode) => nodeStyleDecls(n, tagFor(n))
-  const sa = (n?: ComponentNode) => (n ? styleAttrsFor(n, facetStyle(n)) : '')
+  const facetStyle = (n: ComponentNode) => nodeStyleDecls(ctx, n, tagFor(n))
+  const sa = (n?: ComponentNode) => (n ? styleAttrsFor(ctx, n, facetStyle(n)) : '')
 
   const root = nodes[component.structure.rootId]
   const trigger = node(plan.triggerId)!
@@ -3099,17 +3677,23 @@ function emitMenu(
       : src?.kind === 'prop' && bindingExpr(src.propName)
         ? `${bindingExpr(src.propName)} ?? []`
         : '[]'
+  // A seeded menu has no source yet, and a bare `const list = []` under `strict` is an implicit
+  // `any[]` - which infects `list[active]`, `it.label` and the `.map` below with `noImplicitAny`
+  // errors, so the emitted component does not compile. The annotation is the item shape
+  // `activate` already takes; the sourced cases infer their own and must not be re-typed.
+  const listDecl = listExpr === '[]' ? `list: { label: string; value: string }[]` : 'list'
 
   const selectEmit = Object.values(nodes)
     .flatMap((n) => n.emits ?? [])
     .find((e) => e.on === 'select' || e.on === 'activate')
+  const selectEvent = selectEmit ? emissionEventName(ctx, selectEmit.eventId) : ''
   const activateCall = selectEmit
-    ? `${eventHandlerName(emissionEventName(selectEmit.eventId))}?.(${selectEmit.payload ? 'item.value' : ''}); `
+    ? `${eventHandlerName(selectEvent)}?.(${eventArg(ctx, selectEvent, selectEmit.payload ? 'item.value' : '')}); `
     : ''
   const hasDisabled = (component.contract?.props ?? []).some((p) => p.name === 'disabled')
 
-  const rootStyle = styleAttrsFor(root, [...anchorDecls('menu'), ...facetStyle(root)])
-  const surfStyle = styleAttrsFor(surface, [
+  const rootStyle = styleAttrsFor(ctx, root, [...anchorDecls('menu'), ...facetStyle(root)])
+  const surfStyle = styleAttrsFor(ctx, surface, [
     ...surfacePositionDecls('menu'),
     ...SURFACE_BASE,
     ...facetStyle(surface),
@@ -3118,19 +3702,19 @@ function emitMenu(
   const optionAttr = sa(option)
 
   const trigLines = childrenOf(trigger, component)
-    .map((k) => emitChild(k, component, 4))
+    .map((k) => emitChild(ctx, k, component, 4))
     .filter((s): s is string => s !== null)
   const trigInner = trigLines.length ? `\n${trigLines.join('\n')}\n      ` : ''
 
   const itemLines = childrenOf(option, component)
-    .map((k) => emitChild(k, component, 7))
+    .map((k) => emitChild(ctx, k, component, 7))
     .filter((s): s is string => s !== null)
   const itemInner = itemLines.length ? `\n${itemLines.join('\n')}\n            ` : ''
 
-  const cprops = propTypeLines(component, sharedTypes)
+  const cprops = propTypeLines(ctx, component, sharedTypes)
   const names = propNames(component)
-  const eventLines = eventPropLines(interfaceEventDefs(component), sharedTypes)
-  const handlerNames = emittedHandlerNames(component)
+  const eventLines = eventPropLines(ctx, interfaceEventDefs(ctx, component), sharedTypes)
+  const handlerNames = emittedHandlerNames(ctx, component)
   const interfaceLines = [...cprops, ...eventLines, `  children?: ReactNode`]
 
   const destructure = [...names.filter((n) => n !== 'open'), ...handlerNames, 'children'].join(', ')
@@ -3140,8 +3724,8 @@ function emitMenu(
     `'use client'`,
     ``,
     `import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react'`,
-    ...iconModuleImport(),
-    ...stylesImport(name),
+    ...iconModuleImport(ctx),
+    ...stylesImport(ctx, name),
     ``,
     `export interface ${name}Props {`,
     ...interfaceLines,
@@ -3151,7 +3735,7 @@ function emitMenu(
     `  const [open, setOpen] = useState(${seedsOpen ? 'openProp ?? false' : 'false'})`,
     `  const [active, setActive] = useState(-1)`,
     `  const ref = useRef<HTMLDivElement>(null)`,
-    `  const list = ${listExpr}`,
+    `  const ${listDecl} = ${listExpr}`,
     `  const typeahead = useRef({ q: '', t: 0 })`,
     `  const activate = (item: { label: string; value: string }) => { ${activateCall}setOpen(false) }`,
     ``,
@@ -3197,6 +3781,7 @@ function emitMenu(
 }
 
 function emitCompound(
+  ctx: EmitCtx,
   component: ComponentIR,
   slots: SlotSurface[],
   options: EmitOptions,
@@ -3215,18 +3800,19 @@ function emitCompound(
   const inlineKids = (node: ComponentNode, depth: number): string => {
     const kids = childrenOf(node, component)
       .filter((c) => !slotIds.has(c.id))
-      .map((k) => emitChild(k, component, depth))
+      .map((k) => emitChild(ctx, k, component, depth))
       .filter((s): s is string => s !== null)
     return kids.length ? `\n${kids.join('\n')}\n      ` : ''
   }
 
-  const rootStyleAttr = styleAttrsFor(root, nodeStyleDecls(root, rootTag)) + emissionHandlers(root)
+  const rootStyleAttr =
+    styleAttrsFor(ctx, root, nodeStyleDecls(ctx, root, rootTag)) + emissionHandlers(ctx, root)
   const selectionInterface = plan
     ? ['  value?: string', '  defaultValue?: string', '  onValueChange?: (value: string) => void']
     : []
   const interfaceLines = [
-    ...propTypeLines(component, sharedTypes),
-    ...eventPropLines(component.contract?.events, sharedTypes),
+    ...propTypeLines(ctx, component, sharedTypes),
+    ...eventPropLines(ctx, component.contract?.events, sharedTypes),
     ...selectionInterface,
     '  children?: ReactNode',
   ]
@@ -3246,19 +3832,29 @@ function emitCompound(
     const member = pascalCase(s.name) || 'Slot'
     if (!node || seen.has(member)) continue
     seen.add(member)
+    // A slot exposed on the ROOT part IS the root component - `Card.Root` and `Card`
+    // render the same element, which is why the export below already reads
+    // `Object.assign(RootFn, { Root: RootFn })`. Emitting a second function for it
+    // declared the root's name twice, and the generated package did not compile.
+    if (node.id === root.id) {
+      members.push(`${member}: ${rootFn}`)
+      continue
+    }
     const tag = resolveTag(node, component)
-    const fn = `${name}${member}`
-    const styleA = styleAttrsFor(node, nodeStyleDecls(node, tag))
+    // A slot on some OTHER part that happens to be named `root` would collide with the
+    // root function's name for the same reason, without being the same component.
+    const fn = `${name}${member}` === rootFn ? `${name}${member}Slot` : `${name}${member}`
+    const styleA = styleAttrsFor(ctx, node, nodeStyleDecls(ctx, node, tag))
     const inner = `${inlineKids(node, 3)}{children}`
     const isTrigger = Boolean(plan && s.slot.role === 'trigger')
     const isPanel = Boolean(plan && s.slot.role === 'panel')
 
     const subProps = node.contract?.props ?? []
     const subPropLines = subProps.map(
-      (p) => `  ${camelCase(p.name)}${p.required ? '' : '?'}: ${tsType(p.type, sharedTypes)}`,
+      (p) => `  ${camelCase(p.name)}${p.required ? '' : '?'}: ${tsType(ctx, p.type, sharedTypes)}`,
     )
     if (isTrigger || isPanel) subPropLines.unshift(`  ${vf}: string`)
-    const subEventLines = eventPropLines(node.contract?.events, sharedTypes)
+    const subEventLines = eventPropLines(ctx, node.contract?.events, sharedTypes)
     const subDestructure = [
       ...(isTrigger || isPanel ? [vf] : []),
       ...subProps.map((p) => camelCase(p.name)),
@@ -3267,7 +3863,7 @@ function emitCompound(
 
     let fnBody: string[]
     if (isTrigger) {
-      const handlerA = emissionHandlers(node, { onClick: [`ctx.setValue(${vf})`] })
+      const handlerA = emissionHandlers(ctx, node, { onClick: [`ctx.setValue(${vf})`] })
       fnBody = [
         `function ${fn}({ ${subDestructure} }: ${fn}Props) {`,
         `  const ctx = useContext(${ctxName})`,
@@ -3277,7 +3873,7 @@ function emitCompound(
         `}`,
       ]
     } else if (isPanel) {
-      const handlerA = emissionHandlers(node)
+      const handlerA = emissionHandlers(ctx, node)
       fnBody = [
         `function ${fn}({ ${subDestructure} }: ${fn}Props) {`,
         `  const ctx = useContext(${ctxName})`,
@@ -3288,7 +3884,7 @@ function emitCompound(
         `}`,
       ]
     } else {
-      const handlerA = emissionHandlers(node)
+      const handlerA = emissionHandlers(ctx, node)
       fnBody = [
         `function ${fn}({ ${subDestructure} }: ${fn}Props) {`,
         `  return (`,
@@ -3334,9 +3930,9 @@ function emitCompound(
       ? `import { createContext, useContext, useState, type ReactNode } from 'react'`
       : `import type { ReactNode } from 'react'`,
 
-    ...iconModuleImport(),
-    ...instanceImport(),
-    ...stylesImport(name),
+    ...iconModuleImport(ctx),
+    ...instanceImport(ctx),
+    ...stylesImport(ctx, name),
     ...(plan
       ? [
           ``,
@@ -3392,7 +3988,7 @@ function buildAnchorResolver(
 }
 
 // For a node's self state, the nearest ANCESTOR that CONTROLS it (holds a stateBinding for that
-// state) — so the sheet can re-scope a part's `onSelected`/`onChecked`/… rule under the controlling
+// state) - so the sheet can re-scope a part's `onSelected`/`onChecked`/… rule under the controlling
 // ancestor (`.root[data-selected] .indicator`) instead of emitting the dead self-scoped
 // `.indicator[data-selected]`. Mirrors the preview, where the root's controlled state flows down to
 // all parts (recipes.ts `controlled`). Walks strictly UPWARD, so the controlling node's OWN rule
@@ -3419,53 +4015,57 @@ function buildControlledStateAnchor(
   }
 }
 
+// The interface constraints (proposal 0052 §4.1) narrow whatever props interface the component's
+// emitter wrote, so they are applied once here rather than in each of the archetype emitters. What
+// a type cannot say comes back in `skipped`, for the target's report.
 function emitComponent(
   component: ComponentIR,
   options: EmitOptions = {},
   sharedTypes: SharedType[] = [],
-): { tsx: string; css: string } {
-  activeSheet = new StyleSheet()
-  usesIconComponent = false
-  usesIconNameType = false
-  usesMildaContext = false
-  activeInstances = new Set()
-  activeProps = new Map((component.contract?.props ?? []).map((p) => [p.name, p]))
-  activeEventNames = new Map((component.contract?.events ?? []).map((e) => [e.id, e.name]))
-  activeSurface = resolveSurface(component, options)
-  activeSelection = null
-  activeSelectionCond = null
-  activeStepper = null
-  activeSlider = null
-  activeTextEntry = null
-  activeIconLib = options.icons
-  activeAssets = options.assets
-  componentsById = new Map(Object.entries(options.componentsById ?? {}))
+): { tsx: string; css: string; skipped: string[] } {
+  const out = emitComponentBody(component, options, sharedTypes)
+  const typed = applyInterfaceConstraints(
+    out.tsx,
+    component,
+    componentName(component),
+    camelCase,
+    options.contextGroups,
+  )
+  return { ...out, tsx: typed.tsx, skipped: typed.skipped }
+}
 
-  activeA11y = {
-    labelId: new Map(),
-    controlId: new Map(),
-    labelFor: new Map(),
-    describedId: new Map(),
-    needsUseId: false,
-  }
+/** What a component's constraints could not become as types - for a target's `skipped` list. */
+export function untypedConstraints(component: ComponentIR, options: EmitOptions = {}): string[] {
+  return emitComponent(component, options, options.sharedTypes ?? []).skipped
+}
+
+function emitComponentBody(
+  component: ComponentIR,
+  options: EmitOptions = {},
+  sharedTypes: SharedType[] = [],
+): { tsx: string; css: string } {
+  const ctx = createEmitCtx(component, options)
   const name = componentName(component)
   const root = component.structure.nodes[component.structure.rootId]
   if (!root) return { tsx: `export function ${name}() {\n  return null\n}\n`, css: '' }
 
   // DatePicker has its own view over the shared calendar core (proposal 0029).
   if (component.archetype === 'DatePicker') {
-    return { tsx: emitDatePicker(component, options), css: activeSheet.toCss() }
+    return { tsx: emitDatePicker(ctx, component, options), css: ctx.sheet.toCss() }
   }
   if (component.archetype === 'TimePicker') {
-    return { tsx: emitTimePicker(component, options), css: activeSheet.toCss() }
+    return { tsx: emitTimePicker(ctx, component, options), css: ctx.sheet.toCss() }
   }
   if (component.archetype === 'ColorPicker') {
-    return { tsx: emitColorPicker(component, options), css: activeSheet.toCss() }
+    return { tsx: emitColorPicker(ctx, component, options), css: ctx.sheet.toCss() }
   }
 
   const slots = collectSlots(component).filter((s) => !component.structure.nodes[s.nodeId]?.repeat)
   if (slots.length > 0 && (options.emitStyle ?? 'compound') !== 'props') {
-    return { tsx: emitCompound(component, slots, options, sharedTypes), css: activeSheet.toCss() }
+    return {
+      tsx: emitCompound(ctx, component, slots, options, sharedTypes),
+      css: ctx.sheet.toCss(),
+    }
   }
 
   const plan = planBehavior(component)
@@ -3474,7 +4074,7 @@ function emitComponent(
   // inline disclosures) keep the generic emission path for now.
   if (plan?.kind === 'disclosure' && plan.openOn === 'activate' && !plan.standalone) {
     if (plan.surfaceKind === 'dialog')
-      return { tsx: emitDisclosure(component, plan), css: activeSheet.toCss() }
+      return { tsx: emitDisclosure(ctx, component, plan), css: ctx.sheet.toCss() }
 
     const triggerIsInput = component.structure.nodes[plan.triggerId ?? '']?.kind === 'input'
     if (
@@ -3483,8 +4083,8 @@ function emitComponent(
       plan.optionId
     ) {
       return {
-        tsx: triggerIsInput ? emitCombobox(component, plan) : emitSelect(component, plan),
-        css: activeSheet.toCss(),
+        tsx: triggerIsInput ? emitCombobox(ctx, component, plan) : emitSelect(ctx, component, plan),
+        css: ctx.sheet.toCss(),
       }
     }
 
@@ -3493,55 +4093,91 @@ function emitComponent(
       plan.optionId &&
       !triggerIsInput
     ) {
-      return { tsx: emitMenu(component, plan, sharedTypes), css: activeSheet.toCss() }
+      return { tsx: emitMenu(ctx, component, plan, sharedTypes), css: ctx.sheet.toCss() }
     }
   }
-
-  activeA11y = planA11y(component)
 
   // Generic path only: node ancestry equals DOM ancestry here, so a rule's ancestorStates
   // can be emitted as descendant selectors under the referenced ancestor. (The compound/
   // overlay/menu/date emitters above returned already, leaving the resolver unset → self.)
-  activeSheet.setAnchorResolver(buildAnchorResolver(component))
+  ctx.sheet.setAnchorResolver(buildAnchorResolver(component))
   // Re-scope a fixed part's rule keyed on a ROOT-controlled state under that root, so a toggle's
   // icon/label actually restyle when ON in the generated CSS (matching the preview cascade).
-  activeSheet.setControlledStateAnchor(buildControlledStateAnchor(component))
+  ctx.sheet.setControlledStateAnchor(buildControlledStateAnchor(component))
 
   const tag = resolveTag(root, component)
 
-  const togglePlan = tag === 'button' || tag === 'a' ? planToggle(component) : null
+  const togglePlan = tag === 'button' || tag === 'a' ? planToggle(ctx, component) : null
   const overlayPlan = planOverlays(component)
 
   // A toggle realizes its on-state as `data-<state>` + aria-pressed (see rootData below), not
-  // the input pseudo `:checked`/`:active` — so rules keyed on that state must select the attr.
-  activeSheet.setDataStates(togglePlan ? new Set([togglePlan.dataState]) : undefined)
+  // the input pseudo `:checked`/`:active` - so rules keyed on that state must select the attr.
+  ctx.sheet.setDataStates(togglePlan ? new Set([togglePlan.dataState]) : undefined)
 
   const hostsAnchoredOverlay = [...overlayPlan.surfaces.values()].some((o) => !o.modal)
   const rootAnchor = hostsAnchoredOverlay ? [{ prop: 'position', value: 'relative' }] : []
-  const rootBind = activeSheet.register(root, [...rootAnchor, ...nodeStyleDecls(root, tag)])
-  const variantData = rootBind.dataAttrs.map((d) => ` ${d.attr}={${bindingExpr(d.prop)}}`).join('')
+  const rootBind = ctx.sheet.register(root, [...rootAnchor, ...nodeStyleDecls(ctx, root, tag)])
+  // A context-typed prop's attribute is set by `contextPropAttrs`, with the declared default as
+  // its fallback; the variant attribute for the same prop would be a second `data-<prop>` on the
+  // same element, which JSX rejects. The two spell the same attribute, so one is enough.
+  const contextProps = new Set(
+    (component.contract?.props ?? [])
+      .filter((p) => p.type.kind === 'context' && ctx.contextGroups.has(p.type.group))
+      .map((p) => p.name),
+  )
+  const variantData = rootBind.dataAttrs
+    .filter((d) => !contextProps.has(d.prop))
+    .map((d) => ` ${d.attr}={${bindingExpr(d.prop)}}`)
+    .join('')
+  const contextData = contextPropAttrs(ctx, component)
   const rootData = togglePlan
-    ? `${variantData} data-${togglePlan.dataState}={${togglePlan.stateVar} ? '' : undefined} aria-pressed={${togglePlan.stateVar}}`
-    : variantData + stateBindingAttrs(root)
-  const rootHandlers = togglePlan
-    ? ` onClick={() => { const next = !${togglePlan.stateVar}; ${togglePlan.setter}(next); ${togglePlan.event ? `on${pascalCase(togglePlan.event)}?.(next)` : ''} }}`
-    : emissionHandlers(root)
+    ? `${variantData}${contextData} data-${togglePlan.dataState}={${togglePlan.stateVar} ? '' : undefined} aria-pressed={${togglePlan.stateVar}}`
+    : variantData + contextData + stateBindingAttrs(root)
+  // Secondary activation on the region presents a context menu (proposal 0032's
+  // `openOn: 'context'`), which is the whole of how a ContextMenu is invoked - the same
+  // handler the canvas installs in `applyDisclosure`.
+  const rootContext = overlayPlan.triggers.get(root.id)
+  const contextOpen =
+    rootContext && rootContext.openOn === 'context'
+      ? ` onContextMenu={(e) => { e.preventDefault(); ${rootContext.setter}(true) }}`
+      : ''
+  const rootHandlers =
+    (togglePlan
+      ? ` onClick={() => { const next = !${togglePlan.stateVar}; ${togglePlan.setter}(next); ${togglePlan.event ? `on${pascalCase(togglePlan.event)}?.(${togglePlan.eventArg})` : ''} }}`
+      : emissionHandlers(ctx, root)) + contextOpen
   const overlays = overlayPlan
 
-  activeSelection = planSelection(component)
+  ctx.selection = planSelection(ctx, component)
 
-  activeStepper = planStepper(component)
+  ctx.stepper = planStepper(component)
 
-  activeSlider = planSlider(component)
+  ctx.slider = planSlider(component)
 
-  activeTextEntry = activeStepper || activeSlider ? null : planTextEntry(component)
-  const kids = childrenJsx(root, component, 3, overlays)
+  ctx.textEntry = ctx.stepper || ctx.slider ? null : planTextEntry(ctx, component)
+  const kids = childrenJsx(ctx, root, component, 3, overlays)
   const inner = kids.length ? `\n${kids.join('\n')}\n    ` : ''
 
   const bodyUsesChildren = inner.includes('{children}')
 
   const overlayList = [...overlays.surfaces.values()]
   const hasOverlays = overlayList.length > 0
+  const overlayRefs = overlayList
+    .filter((o) => o.surfaceRef)
+    .flatMap((o) => [
+      `  const ${o.surfaceRef} = useRef<${surfaceRefType(component, o)}>(null)`,
+      // Read from the DOM rather than from a list prop: the items are whatever the
+      // author's repeat produced, and the roles are already on them.
+      `  const _items${o.state.replace('open', '')} = () => Array.from(${o.surfaceRef}.current?.querySelectorAll<HTMLElement>('[role="${o.itemRole ?? 'menuitem'}"]') ?? [])`,
+      `  const ${navName(o)} = (e: ReactKeyboardEvent) => {`,
+      `    const items = _items${o.state.replace('open', '')}()`,
+      `    if (!items.length) return`,
+      `    const i = items.indexOf(document.activeElement as HTMLElement)`,
+      `    if (e.key === 'ArrowDown') { e.preventDefault(); items[Math.min(items.length - 1, i + 1)]?.focus() }`,
+      `    else if (e.key === 'ArrowUp') { e.preventDefault(); items[Math.max(0, i - 1)]?.focus() }`,
+      `    else if (e.key === 'Home') { e.preventDefault(); items[0]?.focus() }`,
+      `    else if (e.key === 'End') { e.preventDefault(); items[items.length - 1]?.focus() }`,
+      `  }`,
+    ])
   const overlayState = overlayList.map((o) => `  const [${o.state}, ${o.setter}] = useState(false)`)
   const overlayEffects = overlayList
     .filter((o) => o.dismissable)
@@ -3551,13 +4187,25 @@ function emitComponent(
       `    if (!${o.state}) return`,
       `    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') ${o.setter}(false) }`,
       `    document.addEventListener('keydown', onKey)`,
-      `    return () => document.removeEventListener('keydown', onKey)`,
+      ...(o.surfaceRef
+        ? [
+            // Opening lands the cursor on the first item, so the menu is usable without
+            // ever touching the pointer that opened it.
+            `    _items${o.state.replace('open', '')}()[0]?.focus()`,
+            // A menu opened by right-click has no trigger to click again, so pointing
+            // anywhere outside it is the only dismissal besides Escape. Bound on mousedown
+            // rather than click so it settles before the browser's own menu logic runs.
+            `    const onDown = (e: MouseEvent) => { if (${o.surfaceRef}.current && !${o.surfaceRef}.current.contains(e.target as Node)) ${o.setter}(false) }`,
+            `    document.addEventListener('mousedown', onDown)`,
+            `    return () => { document.removeEventListener('keydown', onKey); document.removeEventListener('mousedown', onDown) }`,
+          ]
+        : [`    return () => document.removeEventListener('keydown', onKey)`]),
       `  }, [${o.state}])`,
     ])
 
-  const sel = activeSelection
+  const sel = ctx.selection
 
-  const selNav = sel?.containerRole && sel.itemsProp
+  const selNav = usesSelectionNav(ctx)
   const selState = sel
     ? [
         `  const [_selected, setSelValue] = useState(value)`,
@@ -3585,7 +4233,7 @@ function emitComponent(
       ]
     : []
 
-  const step = activeStepper
+  const step = ctx.stepper
   const stepperState = step
     ? [
         `  const [_${step.prop}, _set${pascalCase(step.prop)}] = useState(${step.prop} ?? 0)`,
@@ -3593,7 +4241,7 @@ function emitComponent(
       ]
     : []
 
-  const sl = activeSlider
+  const sl = ctx.slider
   const sliderState = sl
     ? [
         `  const [_${sl.prop}, _set${pascalCase(sl.prop)}] = useState(${sl.prop} ?? 0)`,
@@ -3601,19 +4249,27 @@ function emitComponent(
       ]
     : []
 
-  const te = activeTextEntry
+  const te = ctx.textEntry
   const textState = te
     ? [`  const [_${te.prop}, _set${pascalCase(te.prop)}] = useState(${te.prop} ?? '')`]
     : []
-  const needsUseId = activeA11y.needsUseId
+  const needsUseId = ctx.a11y.needsUseId
   // A context-gated predicate (0032 phase 4) needs the MildaContext hook → 'use client'.
-  const needsClient = hasOverlays || needsUseId || !!sel || !!togglePlan || !!step || !!sl || !!te || usesMildaContext
+  const needsClient =
+    hasOverlays ||
+    needsUseId ||
+    !!sel ||
+    !!togglePlan ||
+    !!step ||
+    !!sl ||
+    !!te ||
+    ctx.usesMildaContext
   const reactHooks = [
     ...(hasOverlays || sel || togglePlan || step || sl || te ? ['useState'] : []),
     ...(overlayList.some((o) => o.dismissable) ? ['useEffect'] : []),
-    ...(step ? ['useRef'] : []),
+    ...(step || overlayRefs.length ? ['useRef'] : []),
     ...(needsUseId ? ['useId'] : []),
-    ...(selNav ? ['type KeyboardEvent as ReactKeyboardEvent'] : []),
+    ...(selNav || overlayRefs.length ? ['type KeyboardEvent as ReactKeyboardEvent'] : []),
   ]
   const runtimeImports = needsClient
     ? [
@@ -3625,11 +4281,12 @@ function emitComponent(
       ]
     : []
   const a11yState = needsUseId ? [`  const _aid = useId()`] : []
-  const mildaCtxState = usesMildaContext ? [`  const _mildaCtx = useMildaContext()`] : []
+  const mildaCtxState = ctx.usesMildaContext ? [`  const _mildaCtx = useMildaContext()`] : []
   const bodyPrelude = needsClient
     ? [
         ...mildaCtxState,
         ...a11yState,
+        ...overlayRefs,
         ...overlayState,
         ...selState,
         ...toggleState,
@@ -3641,22 +4298,22 @@ function emitComponent(
       ]
     : []
 
-  const cprops = propTypeLines(component, sharedTypes)
+  const cprops = propTypeLines(ctx, component, sharedTypes)
   const names = propNames(component)
 
-  const eventLines = eventPropLines(interfaceEventDefs(component), sharedTypes)
+  const eventLines = eventPropLines(ctx, interfaceEventDefs(ctx, component), sharedTypes)
   const hasProps = cprops.length > 0
   const usesReactNode = [...cprops, ...eventLines].some((l) => l.includes('ReactNode'))
 
   if (tag === 'button' || tag === 'a') {
     const dom = tag === 'button' ? 'ButtonHTMLAttributes' : 'AnchorHTMLAttributes'
     const el = tag === 'button' ? 'HTMLButtonElement' : 'HTMLAnchorElement'
-    const surface = activeSurface
+    const surface = ctx.surface
 
     const exposesNativeEvents = surface.domEvents || surface.nativeAttrs
     const eventDecls = exposesNativeEvents
-      ? customEventPropLines(interfaceEventDefs(component), sharedTypes)
-      : eventPropLines(interfaceEventDefs(component), sharedTypes)
+      ? customEventPropLines(ctx, interfaceEventDefs(ctx, component), sharedTypes)
+      : eventPropLines(ctx, interfaceEventDefs(ctx, component), sharedTypes)
 
     const reactTypes = new Set<string>()
     if (usesReactNode || bodyUsesChildren) reactTypes.add('ReactNode')
@@ -3716,8 +4373,9 @@ function emitComponent(
     const nativeApply = spread ? '' : nativeContractNames.map((n) => ` ${n}={${n}}`).join('')
 
     // Navigation destination: an <a> root lowers node.destination (static or prop-bound)
-    // to the native href. Decoupled from prop names — the author declares the binding.
-    const destExpr = tag === 'a' && root.destination ? ` href={${contentValueExpr(root.destination)}}` : ''
+    // to the native href. Decoupled from prop names - the author declares the binding.
+    const destExpr =
+      tag === 'a' && root.destination ? ` href={${contentValueExpr(root.destination)}}` : ''
 
     const destructure = [
       ...(bodyUsesChildren ? ['children'] : []),
@@ -3725,7 +4383,7 @@ function emitComponent(
       ...(exposesStyle ? ['style'] : []),
       ...customNames,
       ...(spread ? [] : nativeContractNames),
-      ...emittedHandlerNames(component),
+      ...emittedHandlerNames(ctx, component),
       ...(spread ? ['...props'] : []),
     ].join(', ')
 
@@ -3733,34 +4391,34 @@ function emitComponent(
       tsx: [
         ...runtimeImports,
         ...(importLine ? [importLine] : []),
-        ...iconModuleImport(),
-        ...mildaContextImport(),
-        ...instanceImport(),
-        ...stylesImport(name),
+        ...iconModuleImport(ctx),
+        ...mildaContextImport(ctx),
+        ...instanceImport(ctx),
+        ...stylesImport(ctx, name),
         ``,
         propsDecl,
         ``,
         `export function ${name}({ ${destructure} }: ${name}Props) {`,
         ...bodyPrelude,
         `  return (`,
-        `    <${tag}${spread ? ' {...props}' : ''}${classExpr}${nativeApply}${destExpr}${rootData}${a11yLabelAttrs(root)}${a11yAttrs(root)}${rootHandlers}${styleExpr}>${inner}</${tag}>`,
+        `    <${tag}${spread ? ' {...props}' : ''}${classExpr}${nativeApply}${destExpr}${rootData}${a11yLabelAttrs(ctx, root)}${a11yAttrs(ctx, root)}${rootHandlers}${styleExpr}>${inner}</${tag}>`,
         `  )`,
         `}`,
         ``,
       ].join('\n'),
-      css: activeSheet.toCss(),
+      css: ctx.sheet.toCss(),
     }
   }
 
-  const selRootA = sel?.containerRole
-    ? ` role="${sel.containerRole}"${selNav ? ' onKeyDown={_onSelKey}' : ''}`
-    : ''
+  // The container role lands on the node core's plan names, which is the root for a
+  // ChoiceGroup/List but the `list` part for Tabs - a tablist must not enclose its panel.
+  const selRootA = selectionContainerAttrs(ctx, root) + selectionPanelAttrs(ctx, root)
   const rootAttrs =
     (rootBind.className ? ` className={styles.${rootBind.className}}` : '') +
     rootData +
     selRootA +
-    a11yLabelAttrs(root) +
-    (isNameableControl(root) ? a11yAttrs(root) : '') +
+    a11yLabelAttrs(ctx, root) +
+    (isNameableControl(root) ? a11yAttrs(ctx, root) : '') +
     rootHandlers
 
   const childLines = bodyUsesChildren ? [`  children?: ReactNode`] : []
@@ -3768,17 +4426,17 @@ function emitComponent(
   const needsReactNode = interfaceLines.some((l) => l.includes('ReactNode'))
   const destructure = [
     ...names,
-    ...emittedHandlerNames(component),
+    ...emittedHandlerNames(ctx, component),
     ...(bodyUsesChildren ? ['children'] : []),
   ].join(', ')
   return {
     tsx: [
       ...runtimeImports,
       ...(needsReactNode ? [`import type { ReactNode } from 'react'`] : []),
-      ...iconModuleImport(),
-      ...mildaContextImport(),
-      ...instanceImport(),
-      ...stylesImport(name),
+      ...iconModuleImport(ctx),
+      ...mildaContextImport(ctx),
+      ...instanceImport(ctx),
+      ...stylesImport(ctx, name),
       ``,
       `export interface ${name}Props {`,
       ...interfaceLines,
@@ -3792,7 +4450,7 @@ function emitComponent(
       `}`,
       ``,
     ].join('\n'),
-    css: activeSheet.toCss(),
+    css: ctx.sheet.toCss(),
   }
 }
 
@@ -3821,9 +4479,10 @@ export function toComponentFiles(
   options: EmitOptions = {},
   sharedTypes: SharedType[] = [],
 ): { tsx: string; css: string } {
-  return emitComponent(
+  const { tsx, css } = emitComponent(
     component,
     options,
     sharedTypes.length ? sharedTypes : (options.sharedTypes ?? []),
   )
+  return { tsx, css }
 }

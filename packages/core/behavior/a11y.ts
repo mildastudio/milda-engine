@@ -7,7 +7,7 @@ export function isNameableControl(node: ComponentNode): boolean {
 export function hasAccessibleName(node: ComponentNode): boolean {
   if (node.a11y?.name || node.a11y?.labelledBy) return true
   // A default-slot control (a bare Tooltip/Popover trigger) defers its name to
-  // whatever the consumer eventually wraps it around — it isn't nameless, the
+  // whatever the consumer eventually wraps it around - it isn't nameless, the
   // name just isn't known yet at the archetype level.
   if (node.slot?.default) return true
   return Boolean(node.content)
@@ -18,11 +18,17 @@ export function controlMissingName(node: ComponentNode): boolean {
 }
 
 function hasTextLabel(node: ComponentNode): boolean {
-  // A text node names a control only if it actually carries content — an EMPTY label node (no
-  // content: an icon-only button whose label was never given text) provides no accessible name,
-  // so it must not silence the name-risk warning. Mirrors the node-level `hasAccessibleName`'s
+  if (node.kind !== 'text') return false
+  // A label part whose text comes from a SLOT is not nameless - the consumer supplies the text
+  // (`<Button>Save</Button>`), so the name is DEFERRED, not missing. Same reasoning as the
+  // node-level `hasAccessibleName`'s own slot check, one level down: the archetype can't know
+  // the name yet, and warning here would fire on every seeded Button.
+  if (node.slot) return true
+  // Otherwise a text node names a control only if it actually carries content - an EMPTY label
+  // node (no content, no slot: an icon-only button whose label was never given text) provides no
+  // accessible name, so it must not silence the name-risk warning. Mirrors the node-level
   // `Boolean(node.content)`; a bound/static label counts, a content-less one doesn't.
-  return node.kind === 'text' && Boolean(node.content)
+  return Boolean(node.content)
 }
 
 function subtreeHasTextLabel(node: ComponentNode, nodes: Record<string, ComponentNode>): boolean {

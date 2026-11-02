@@ -94,7 +94,10 @@ describe('manifest', () => {
 
   it('mergeManifests keeps first-seen for a colliding id (id is global to the DS)', () => {
     const a = { 'x/y': { default: 'First', source: 'content' as const } }
-    const b = { 'x/y': { default: 'Second', source: 'content' as const }, 'a/b': { default: 'C', source: 'a11y' as const } }
+    const b = {
+      'x/y': { default: 'Second', source: 'content' as const },
+      'a/b': { default: 'C', source: 'a11y' as const },
+    }
     const merged = mergeManifests([a, b])
     expect(merged['x/y'].default).toBe('First')
     expect(merged['a/b'].default).toBe('C')

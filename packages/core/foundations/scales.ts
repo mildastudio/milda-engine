@@ -62,6 +62,10 @@ export const SCALES: Record<ScaleName, ScaleToken[]> = {
     { id: 'semibold', name: 'Semibold', value: '600' },
     { id: 'bold', name: 'Bold', value: '700' },
   ],
+  // NOT seeded from here (see defaultFoundations): a family token names one of the document's
+  // font-library entries, so its tokens are minted beside that library and these strings would
+  // be a CSS stack standing in for a font nothing could preview. Kept because `ScaleName` is
+  // the scale vocabulary and every entry needs a row; read by nothing else.
   fontFamily: [
     { id: 'sans', name: 'Sans', value: 'system-ui, -apple-system, sans-serif' },
     { id: 'serif', name: 'Serif', value: 'Georgia, "Times New Roman", serif' },

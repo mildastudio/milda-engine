@@ -83,7 +83,11 @@ export function hexToRgb(hex: string): RGB | null {
   let h = hex.trim().replace(/^#/, '')
   if (h.length === 3) h = h[0] + h[0] + h[1] + h[1] + h[2] + h[2]
   if (h.length !== 6 || /[^0-9a-fA-F]/.test(h)) return null
-  return { r: parseInt(h.slice(0, 2), 16), g: parseInt(h.slice(2, 4), 16), b: parseInt(h.slice(4, 6), 16) }
+  return {
+    r: parseInt(h.slice(0, 2), 16),
+    g: parseInt(h.slice(2, 4), 16),
+    b: parseInt(h.slice(4, 6), 16),
+  }
 }
 
 export function hsvToHex(c: HSV): string {
@@ -188,17 +192,31 @@ export function rgbaToHex8(c: RGB, a: number): string {
 /** Parse #rgb / #rgba / #rrggbb / #rrggbbaa. Returns rgb + alpha (1 when absent). */
 export function hexToRgba(hex: string): { rgb: RGB; a: number } | null {
   let h = hex.trim().replace(/^#/, '')
-  if (h.length === 3 || h.length === 4) h = h.split('').map((ch) => ch + ch).join('')
+  if (h.length === 3 || h.length === 4)
+    h = h
+      .split('')
+      .map((ch) => ch + ch)
+      .join('')
   if ((h.length !== 6 && h.length !== 8) || /[^0-9a-fA-F]/.test(h)) return null
-  const rgb = { r: parseInt(h.slice(0, 2), 16), g: parseInt(h.slice(2, 4), 16), b: parseInt(h.slice(4, 6), 16) }
+  const rgb = {
+    r: parseInt(h.slice(0, 2), 16),
+    g: parseInt(h.slice(2, 4), 16),
+    b: parseInt(h.slice(4, 6), 16),
+  }
   const a = h.length === 8 ? parseInt(h.slice(6, 8), 16) / 255 : 1
   return { rgb, a }
 }
 
 /** `rgb(r g b)` or `rgb(r g b / a)` CSS string. */
 export function rgbToCss(c: RGB, a = 1): string {
-  const rgb = { r: round(clampN(c.r, 0, 255)), g: round(clampN(c.g, 0, 255)), b: round(clampN(c.b, 0, 255)) }
-  return a < 1 ? `rgb(${rgb.r} ${rgb.g} ${rgb.b} / ${+clamp01(a).toFixed(3)})` : `rgb(${rgb.r} ${rgb.g} ${rgb.b})`
+  const rgb = {
+    r: round(clampN(c.r, 0, 255)),
+    g: round(clampN(c.g, 0, 255)),
+    b: round(clampN(c.b, 0, 255)),
+  }
+  return a < 1
+    ? `rgb(${rgb.r} ${rgb.g} ${rgb.b} / ${+clamp01(a).toFixed(3)})`
+    : `rgb(${rgb.r} ${rgb.g} ${rgb.b})`
 }
 
 /** `hsl(h s% l%)` or `hsl(h s% l% / a)` CSS string. */
@@ -226,8 +244,10 @@ export interface OKLCH {
   h: number
 }
 
-const srgbToLinear = (c: number): number => (c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4))
-const linearToSrgb = (c: number): number => (c <= 0.0031308 ? 12.92 * c : 1.055 * Math.pow(c, 1 / 2.4) - 0.055)
+const srgbToLinear = (c: number): number =>
+  c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4)
+const linearToSrgb = (c: number): number =>
+  c <= 0.0031308 ? 12.92 * c : 1.055 * Math.pow(c, 1 / 2.4) - 0.055
 const cbrt = (n: number): number => Math.cbrt(n)
 
 export function rgbToOklch(c: RGB): OKLCH {
@@ -237,7 +257,9 @@ export function rgbToOklch(c: RGB): OKLCH {
   const l = 0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b
   const m = 0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b
   const s = 0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b
-  const l_ = cbrt(l), m_ = cbrt(m), s_ = cbrt(s)
+  const l_ = cbrt(l),
+    m_ = cbrt(m),
+    s_ = cbrt(s)
   const L = 0.2104542553 * l_ + 0.793617785 * m_ - 0.0040720468 * s_
   const A = 1.9779984951 * l_ - 2.428592205 * m_ + 0.4505937099 * s_
   const B = 0.0259040371 * l_ + 0.7827717662 * m_ - 0.808675766 * s_
@@ -255,7 +277,9 @@ function oklchToLinearRgb(c: OKLCH): { r: number; g: number; b: number } {
   const l_ = c.l + 0.3963377774 * A + 0.2158037573 * B
   const m_ = c.l - 0.1055613458 * A - 0.0638541728 * B
   const s_ = c.l - 0.0894841775 * A - 1.291485548 * B
-  const l = l_ * l_ * l_, m = m_ * m_ * m_, s = s_ * s_ * s_
+  const l = l_ * l_ * l_,
+    m = m_ * m_ * m_,
+    s = s_ * s_ * s_
   return {
     r: 4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
     g: -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
@@ -268,9 +292,12 @@ export function oklchInGamut(c: OKLCH): boolean {
   const lin = oklchToLinearRgb(c)
   const eps = 1e-4
   return (
-    lin.r >= -eps && lin.r <= 1 + eps &&
-    lin.g >= -eps && lin.g <= 1 + eps &&
-    lin.b >= -eps && lin.b <= 1 + eps
+    lin.r >= -eps &&
+    lin.r <= 1 + eps &&
+    lin.g >= -eps &&
+    lin.g <= 1 + eps &&
+    lin.b >= -eps &&
+    lin.b <= 1 + eps
   )
 }
 
@@ -279,7 +306,8 @@ export function oklchToRgb(input: OKLCH): RGB {
   const base = { l: clamp01(input.l), c: Math.max(0, input.c), h: ((input.h % 360) + 360) % 360 }
   let c = base.c
   if (!oklchInGamut(base)) {
-    let lo = 0, hi = base.c
+    let lo = 0,
+      hi = base.c
     for (let i = 0; i < 20; i++) {
       const mid = (lo + hi) / 2
       if (oklchInGamut({ ...base, c: mid })) lo = mid
@@ -324,7 +352,11 @@ export interface OklchModel {
 }
 
 export function buildOklch(input: OKLCH): OklchModel {
-  const oklch = { l: clamp01(input.l), c: clampN(input.c, 0, OKLCH_MAX_CHROMA), h: ((input.h % 360) + 360) % 360 }
+  const oklch = {
+    l: clamp01(input.l),
+    c: clampN(input.c, 0, OKLCH_MAX_CHROMA),
+    h: ((input.h % 360) + 360) % 360,
+  }
   return {
     oklch,
     rgb: oklchToRgb(oklch),

@@ -1,5 +1,5 @@
 import type { ComponentIR, DocumentFoundations } from '@mildastudio/core'
-import type { GeneratedFile } from '../../index'
+import type { GeneratedFile, Target } from '../../index'
 import { buildTokenExport, type TokenExport } from './model'
 import { toFigmaVariables } from './variables'
 import { toDtcg } from './dtcg'
@@ -44,11 +44,11 @@ export { buildTokenExport } from './model'
 export type { TokenExport } from './model'
 
 // ─── Component export (proposal 0010 phase 2) ────────────────────────────────
-// milda.figma.components/v1 — one JSON document for the whole library, so the
+// milda.figma.components/v1 - one JSON document for the whole library, so the
 // plugin can resolve `instance` node cross-references (componentNames) in one
 // pass. Kept as a dedicated function rather than a generic `Target` (see
 // packages/generate/index.ts) because its output isn't per-language source
-// files — same precedent as `figmaFoundationsExport` above.
+// files - same precedent as `figmaFoundationsExport` above.
 
 export interface FigmaComponentVariantExport {
   name: string
@@ -136,4 +136,54 @@ export function figmaComponentExport(
     ],
     skipped,
   }
+}
+
+// ─── The Figma target, at the seam (proposal 0045 phase 4) ───────────────────
+// The two functions above stay: they are the Figma-shaped API, and the Studio's export
+// route calls them directly with the format and variant limits it wants. This adapter is
+// what makes Figma a `Target` alongside React, which is the thing phase 4 exists to prove.
+//
+// It is `library` granularity because a Figma file IS one document - `figma-components.json`
+// holds every component set, so there is no smaller unit to emit. That is not a limitation
+// to work around; it is what the target is, and the interface now says so rather than
+// pretending Figma is React with a different printer.
+//
+// `skipped` is the other half. This target is honestly lossy - no elevation effects, no
+// font-weight loading, no focus ring - and proposal 0010's doctrine is to log that rather
+// than fake it. Both underlying functions already produce the list; before phase 4 it had
+// nowhere to go once you went through the seam.
+
+export const figmaTarget: Target = {
+  name: 'figma',
+  granularity: 'library',
+  emitDocument(doc, options) {
+    const opts = (options ?? {}) as FigmaComponentExportOptions & { format?: FigmaExportFormat }
+    const files: GeneratedFile[] = []
+    const skipped: string[] = []
+
+    if (doc.foundations) {
+      const tokens = figmaFoundationsExport(doc.foundations, opts.format ?? 'both')
+      files.push(...tokens.files)
+      // The token export names what it dropped per token; the component export names it per
+      // component. Prefixed so a reader can tell which half refused.
+      for (const s of tokens.skipped) skipped.push(`tokens: ${s.name} (${s.reason})`)
+    }
+
+    if (Object.keys(doc.componentsById).length > 0) {
+      // Components need foundations to resolve their facets; without them there is nothing
+      // honest to draw, so say that rather than emitting unstyled frames.
+      if (!doc.foundations) {
+        skipped.push('components: no foundations, so no facet resolves to a Figma value')
+      } else {
+        const components = figmaComponentExport(doc.componentsById, doc.foundations, {
+          maxVariantsPerComponent: opts.maxVariantsPerComponent,
+          assets: doc.assets,
+        })
+        files.push(...components.files)
+        skipped.push(...components.skipped)
+      }
+    }
+
+    return { files, skipped }
+  },
 }

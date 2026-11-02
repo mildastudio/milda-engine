@@ -9,7 +9,7 @@ export interface FigmaComponentProperty {
   type: FigmaPropertyType
   defaultValue: string | boolean
   variantOptions?: string[]
-  // Which node's content this TEXT property drives — informational; the scene's
+  // Which node's content this TEXT property drives - informational; the scene's
   // own per-node `contentBinding` is the authoritative wiring the plugin follows.
   boundNodeName?: string
 }

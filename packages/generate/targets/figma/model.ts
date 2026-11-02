@@ -1,11 +1,17 @@
 import {
-  canonicalLength,
+  formatLength,
+  lengthOf,
+  lengthToDp,
+  colorToHex,
+  computeColor,
   defaultContextSelections,
   easingToCss,
   findToken,
+  fontFamilyStack,
   isLengthType,
   resolveGradient,
   resolveTextStyle,
+  toSrgb,
   type DocumentFoundations,
   type Layer,
   type Slot,
@@ -78,7 +84,7 @@ function figmaType(type: TokenType): FigmaVarType | null {
   if (type === 'color') return 'COLOR'
   if (type === 'gradient' || type === 'textStyle') return null
   // Both resolve to a raw CSS string (box-shadow / cubic-bezier(...)), never a
-  // number — declaring them FLOAT (the catch-all below) made the plugin's
+  // number - declaring them FLOAT (the catch-all below) made the plugin's
   // setValueForMode reject the string value as a resolved-type mismatch.
   if (type === 'elevation' || type === 'easing') return 'STRING'
   return 'FLOAT'
@@ -126,32 +132,63 @@ function slotToValue(
   if ('easing' in slot) {
     return { kind: 'string', value: easingToCss(slot.easing) ?? '' }
   }
+  // A family exports as its STACK. Figma has no font-family variable of its own to alias, and
+  // the library entry is a Milda concept - so what crosses the boundary is the value a text
+  // layer can actually wear.
+  if ('font' in slot) {
+    const fam = foundations.fonts?.find((f) => f.id === slot.font.id)
+    return { kind: 'string', value: fam ? fontFamilyStack(fam) : '' }
+  }
+  // A typed colour skips the string round-trip entirely and gamut-maps through the
+  // shared core, which reduces chroma rather than clipping each channel - so a
+  // wide-gamut token keeps its hue on the way into Figma's sRGB-only paints.
+  if ('color' in slot) {
+    if (token.type !== 'color') return null
+    return { kind: 'color', rgba: toSrgb(slot.color), hex: colorToHex(slot.color) }
+  }
+  // A computed colour is FLATTENED for Figma rather than aliased: Figma variables have
+  // no notion of a derived value, so the modifier is evaluated here and the result is
+  // exported as a concrete colour. The relationship stays live in Milda (the source of
+  // truth); a re-sync recomputes it.
+  if ('compute' in slot) {
+    if (token.type !== 'color') return null
+    const computed = computeColor(slot.compute, foundations, context)
+    if (!computed) return null
+    return { kind: 'color', rgba: toSrgb(computed), hex: colorToHex(computed) }
+  }
 
-  const raw = slot.raw
+  // A typed length arrives as its canonical spelling and is lowered to a number just
+  // below, so both slot shapes share one code path.
+  const raw = 'dimension' in slot ? formatLength(lengthOf(slot.dimension)) : slot.raw
   if (token.type === 'color') {
     const rgba = parseColor(raw)
     if (!rgba) return null
     return { kind: 'color', rgba, hex: raw }
   }
   if (token.type === 'elevation') return { kind: 'string', value: raw }
+  // Figma variables are numbers, so a length lowers HERE, at the target boundary
+  // (0038): a text-scaled length collapses using the assumed root text size, and `pill`
+  // becomes the large radius Figma clamps to the box. Percentages and viewport units
+  // have no numeric equivalent, so they keep their string form rather than inventing one.
   if (isLengthType(token.type)) {
-    const dp = canonicalLength(raw)
-    const n = parseFloat(dp)
-    if (Number.isNaN(n)) return { kind: 'string', value: raw }
-    return { kind: 'number', value: n, css: `${n}px` }
+    const dp = lengthToDp(raw)
+    if (dp == null) return { kind: 'string', value: raw }
+    return { kind: 'number', value: dp, css: `${dp}px` }
   }
   const n = parseFloat(raw)
   if (Number.isNaN(n)) return { kind: 'string', value: raw }
   return { kind: 'number', value: n, css: raw }
 }
 
+// Figma variables carry one value per MODE of a single collection, so the export can only
+// follow one aspect - the primary group. An exception belonging to any other aspect is not
+// representable here and is left out, exactly as before (the token still exports, at its
+// base value for every mode).
 function slotForMode(token: Token, modeGroupId: string | null, modeId: string): Slot {
   const v = token.value
-  if (v.kind === 'fixed') return v.slot
-  if (modeGroupId && v.by === modeGroupId) {
-    return v.slots[modeId] ?? v.slots.default ?? Object.values(v.slots)[0]
-  }
-  return v.slots.default ?? Object.values(v.slots)[0]
+  if (!modeGroupId) return v.base
+  const hit = (v.exceptions ?? []).find((e) => e.group === modeGroupId && e.context === modeId)
+  return hit?.slot ?? v.base
 }
 
 export function buildTokenExport(foundations: DocumentFoundations): TokenExport {
@@ -215,7 +252,7 @@ export function buildTokenExport(foundations: DocumentFoundations): TokenExport 
         if (ftype === null) {
           skipped.push({
             name: variableName(token),
-            reason: `${token.type} has no flat Figma variable type — exported to DTCG only.`,
+            reason: `${token.type} has no flat Figma variable type - exported to DTCG only.`,
           })
         }
       }

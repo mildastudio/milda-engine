@@ -52,9 +52,7 @@ export type NodeOrigin = 'root' | 'archetype' | 'author'
 // enum select) rather than a raw text field. The legacy string leg (`{ kind: 'text' }`)
 // was migrated to `value` (`migrateDocument`); `normalizeContentValue` still folds any
 // un-migrated `text` at runtime for safety.
-export type ContentValue =
-  | { kind: 'value'; value: PropValue }
-  | { kind: 'bind'; propName: string }
+export type ContentValue = { kind: 'value'; value: PropValue } | { kind: 'bind'; propName: string }
 
 export interface ContentRule {
   id: string
@@ -69,8 +67,7 @@ export type NodeContent =
   | { kind: 'dynamic'; default: ContentValue; rules: ContentRule[] }
 
 export type RepeatSource =
-  | { kind: 'prop'; propName: string }
-  | { kind: 'static'; items: PropValue[]; itemType?: PropType }
+  { kind: 'prop'; propName: string } | { kind: 'static'; items: PropValue[]; itemType?: PropType }
 
 export interface NodeRepeat {
   source: RepeatSource
@@ -89,25 +86,24 @@ export interface ValueSpec {
 
 export type MediaType = 'img' | 'video' | 'audio' | 'embed'
 
-// A design-time-only preview aid for a `bind` media source — the generator ignores
+// A design-time-only preview aid for a `bind` media source - the generator ignores
 // it entirely (same convention as a slot's `sample`). Lets the canvas/docs show a
 // real image for an avatar/card-image/etc. whose actual source is consumer-supplied.
 // Unlike `MediaSource.static` this is LITERAL data an author typed in, not a design-
 // system vocabulary choice (same standing as a text node's static string), so a
-// raw `url` is honest here even though the rest of the Studio UI is selects-only —
+// raw `url` is honest here even though the rest of the Studio UI is selects-only -
 // it never ships, never enters the contract, purely a canvas/docs stand-in.
 export type MediaSample = { kind: 'asset'; assetId: string } | { kind: 'url'; url: string }
 
 // Two honest cases (proposal 0028), same split as icon provenance (0019):
-// - `bind` — the DEFAULT, encouraged case for reusable "media slot" components
+// - `bind` - the DEFAULT, encouraged case for reusable "media slot" components
 //   (avatar, card header, aspect-ratio box). The consumer supplies the source at
 //   runtime; an optional `sample` asset is a preview-only stand-in, never emitted.
-// - `static` — the image itself IS the design system's content (a logo, an
+// - `static` - the image itself IS the design system's content (a logo, an
 //   empty-state illustration, a brand animation). A deliberate, less common choice;
 //   unlike `bind`, this is meant to ship as real output.
 export type MediaSource =
-  | { kind: 'bind'; propName: string; sample?: MediaSample }
-  | { kind: 'static'; assetId: string }
+  { kind: 'bind'; propName: string; sample?: MediaSample } | { kind: 'static'; assetId: string }
 
 export interface CellSpec {
   header?: boolean
@@ -131,7 +127,7 @@ export interface NodeA11y {
 
   labelledBy?: string
 
-  // A node whose text further describes this one (aria-describedby) — a
+  // A node whose text further describes this one (aria-describedby) - a
   // SUPPLEMENT to the accessible name, not a replacement for it (unlike
   // `labelledBy`). E.g. the relationship a Tooltip's trigger has to its content.
   describedBy?: string
@@ -160,15 +156,7 @@ export interface ForeignContent {
 }
 
 export type InteractionKind =
-  | 'activate'
-  | 'change'
-  | 'input'
-  | 'focus'
-  | 'blur'
-  | 'select'
-  | 'open'
-  | 'close'
-  | 'dismiss'
+  'activate' | 'change' | 'input' | 'focus' | 'blur' | 'select' | 'open' | 'close' | 'dismiss'
 
 // A single typed demo-state variable (proposal 0021 slice 2, extended): its declared
 // type and initial value. The example's preview seeds its prop store from `initial`,
@@ -211,9 +199,7 @@ export interface NodeStateBinding {
 export type SlotArity = 'single' | 'optional' | 'many'
 
 export type SlotAccepts =
-  | { kind: 'content' }
-  | { kind: 'type'; ref: string }
-  | { kind: 'component'; ref: string }
+  { kind: 'content' } | { kind: 'type'; ref: string } | { kind: 'component'; ref: string }
 
 export type SlotRole = 'trigger' | 'panel'
 
@@ -230,7 +216,7 @@ export interface NodeSlot {
 
   role?: SlotRole
 
-  // Human-authored doc prose for this slot — the SSoT the Docs page shows and edits
+  // Human-authored doc prose for this slot - the SSoT the Docs page shows and edits
   // (proposal 0018). Purely documentation; never affects realization.
   description?: string
 }
@@ -271,7 +257,7 @@ export type StateName =
 
 export type PropCondition = Record<string, PropValue>
 
-// A condition on an ANCESTOR node's UI state — "when {nodeId} is {state}". Lets a
+// A condition on an ANCESTOR node's UI state - "when {nodeId} is {state}". Lets a
 // descendant respond to a specific ancestor's interaction/semantic state (the icon
 // repaints when its Button is hovered). The nodeId names an ancestor on this node's
 // path to the root; the generator emits it as a descendant selector
@@ -293,7 +279,7 @@ export interface StateRule {
   // Rich condition (proposal 0032). When present it is the CANONICAL condition and
   // SUPERSEDES `props`/`states`/`ancestorStates` (those stay the representable fast path the
   // matrix picker writes; `when` holds operators / OR / NOT the CSS target realizes via a
-  // computed `data-cond` boolean). Absent on all existing rules — additive, no migration.
+  // computed `data-cond` boolean). Absent on all existing rules - additive, no migration.
   when?: Predicate
 
   facets?: Record<string, string>
@@ -319,7 +305,7 @@ export interface NodeMotion {
 // Per-component DatePicker settings, baked into the generated component (not
 // runtime props). Same node-attached pattern as `motion` (0017) / `mediaSource`
 // (0028) / `a11y` (0013). The date-value *representation* is deliberately NOT
-// here — it is a project/publish-level decision (target options, 0015).
+// here - it is a project/publish-level decision (target options, 0015).
 
 export type Weekday = 0 | 1 | 2 | 3 | 4 | 5 | 6
 
@@ -491,7 +477,7 @@ export interface ComponentNode {
   content?: NodeContent
 
   // Navigation destination for a navigating node (Link root / <a>). Static URL or bound to
-  // a prop, same ContentValue pattern as `mediaAlt` / `a11y.name` — the destination is a
+  // a prop, same ContentValue pattern as `mediaAlt` / `a11y.name` - the destination is a
   // declared, bindable seam, NOT inferred from a prop name. The web target lowers it to the
   // native `href`; other targets realize it via their own navigation primitive.
   destination?: ContentValue
@@ -506,7 +492,7 @@ export interface ComponentNode {
 
   mediaSource?: MediaSource
 
-  // Accessible alt text for a `content`/img node — static or bound to a prop, same
+  // Accessible alt text for a `content`/img node - static or bound to a prop, same
   // pattern as NodeA11y.name (0013). Defaults to the asset's own `alt` when unset
   // and mediaSource is `static`.
   mediaAlt?: ContentValue
@@ -551,7 +537,7 @@ export interface ComponentNode {
 
   states?: StateRule[]
 
-  // Conditional presence (0031, generalized to a predicate in 0032) — when set, the node
+  // Conditional presence (0031, generalized to a predicate in 0032) - when set, the node
   // renders only when the predicate holds; absent = always present. Unlike StateRule
   // (which repaints an ever-present node), presence gates whether the node is rendered at
   // all. The predicate can test props (repeat-item-alias aware), UI states, and (0032
@@ -569,7 +555,7 @@ export interface ComponentNode {
 }
 
 // ─── Component-level behavior composition (proposal 0024, phase 2) ────────────
-// The §9 algebra a component composes from its atoms — authored per-component and
+// The §9 algebra a component composes from its atoms - authored per-component and
 // stored on the IR (previously only implicit in the archetype). Each entry carries a
 // stable `id` so the editor can add/update/remove it. The generator/emitter read the
 // EFFECTIVE composition = the archetype's canonical wiring ⊕ these authored entries.
@@ -632,7 +618,7 @@ export interface ComponentIR {
   // uses only its archetype's canonical composition; present ⇒ overlaid on top.
   composition?: ComponentComposition
 
-  // Free-form descriptive metadata (proposal 0026) — status/since/tags/author/…
+  // Free-form descriptive metadata (proposal 0026) - status/since/tags/author/…
   // Never contractual (excluded from the contract digest); optional → absent on
   // documents authored before metadata existed (no migration needed).
   meta?: Record<string, string | number | boolean | Array<string | number | boolean>>

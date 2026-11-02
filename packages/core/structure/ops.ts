@@ -36,6 +36,7 @@ import type { NodeBehavior } from '../behavior/free'
 import { isUnconditional, type Predicate } from './predicate'
 import {
   customToggleVariant,
+  partLeaf,
   checkboxGlyphChild,
   CHECKBOX_INDICATOR_PART,
   CHECKBOX_GLYPH_PART,
@@ -478,10 +479,6 @@ export function setGroupRealization(
 
 export type ToggleButtonForm = 'text' | 'iconText' | 'icon'
 
-function partLeaf(node: ComponentNode | undefined): string | undefined {
-  return node?.part?.split('.').pop()
-}
-
 function findInSubtree(
   structure: ComponentStructure,
   pred: (n: ComponentNode) => boolean,
@@ -688,8 +685,11 @@ export const setSlider = (s: ComponentStructure, id: string, v: NodeSlider | nul
   setNodeField(s, id, 'slider', v)
 export const setRating = (s: ComponentStructure, id: string, v: NodeRating | null) =>
   setNodeField(s, id, 'rating', v)
-export const setColorPickerConfig = (s: ComponentStructure, id: string, v: NodeColorPicker | null) =>
-  setNodeField(s, id, 'colorPicker', v)
+export const setColorPickerConfig = (
+  s: ComponentStructure,
+  id: string,
+  v: NodeColorPicker | null,
+) => setNodeField(s, id, 'colorPicker', v)
 export const setOverlay = (s: ComponentStructure, id: string, v: NodeOverlay | null) =>
   setNodeField(s, id, 'overlay', v)
 
@@ -944,6 +944,24 @@ export function removeEmission(
   return setNodeEmits(structure, nodeId, (es) => es.filter((e) => e.id !== emissionId))
 }
 
+/**
+ * Is `candidateId` the node itself, or somewhere below it? Walks parents rather than
+ * children so the cost is the depth, not the subtree. The step budget is a backstop: if a
+ * document is ALREADY cyclic the walk must still terminate rather than hang the editor.
+ */
+function isSelfOrDescendant(
+  structure: ComponentStructure,
+  nodeId: string,
+  candidateId: string,
+): boolean {
+  let cursor: string | null = candidateId
+  for (let steps = 0; cursor && steps <= Object.keys(structure.nodes).length; steps += 1) {
+    if (cursor === nodeId) return true
+    cursor = structure.nodes[cursor]?.parentId ?? null
+  }
+  return false
+}
+
 export function moveNode(
   structure: ComponentStructure,
   nodeId: string,
@@ -954,6 +972,12 @@ export function moveNode(
   const node = structure.nodes[nodeId]
   const newParent = structure.nodes[newParentId]
   if (!node || !newParent) return structure
+  // A node cannot be moved inside itself or inside its own descendant. Without this the
+  // node and its new parent end up mutually parented and severed from the root: the
+  // subtree is unreachable, a parent walk never terminates, and because the reducer is
+  // pure and the gateway upserts whole snapshots, the corruption persists to the server
+  // with nothing to notice it. Refusal is `return structure`, as elsewhere in this file.
+  if (isSelfOrDescendant(structure, nodeId, newParentId)) return structure
 
   const next = clone(structure)
 

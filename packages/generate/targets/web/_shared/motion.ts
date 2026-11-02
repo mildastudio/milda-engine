@@ -1,6 +1,12 @@
-import type { NodeMotion } from './types'
-import type { StyleDecl } from '../facets/facets'
-import { DEFAULT_EASING_ID } from '../foundations/easing'
+// Tier 2 (web) - motion lowered to the CSS `transition` shorthand.
+//
+// `NodeMotion` and the transition TYPES are neutral and stay in core: a node saying "animate
+// my fill over 120ms" is design intent every target must honour. Naming the animatable thing
+// `background-color` and packing the layers into one `transition` string is a browser fact,
+// which is why this half left `packages/core/structure/motion.ts` in proposal 0045 phase 1.
+
+import { DEFAULT_EASING_ID, type NodeMotion } from '@mildastudio/core'
+import type { StyleDecl } from './decl'
 
 const FACET_TRANSITION_PROPS: Record<string, string[]> = {
   fill: ['background-color'],

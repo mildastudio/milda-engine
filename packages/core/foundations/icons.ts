@@ -6,8 +6,8 @@ export interface IconSet {
   license: string
   /**
    * Four representative icon names for previews (home / heart / star / settings
-   * concepts). Names differ per set — Remix suffixes with `-line`, Bootstrap
-   * uses `house`/`gear`, etc. — so each set declares its own; a preview that
+   * concepts). Names differ per set - Remix suffixes with `-line`, Bootstrap
+   * uses `house`/`gear`, etc. - so each set declares its own; a preview that
    * still misses falls back to the app-wide placeholder.
    */
   samples?: [string, string, string, string]
@@ -40,8 +40,7 @@ export function resolveIconRef(
 }
 
 export type ResolvedIcon =
-  | { kind: 'set'; prefix: string; name: string; svg?: string }
-  | { kind: 'custom'; url: string }
+  { kind: 'set'; prefix: string; name: string; svg?: string } | { kind: 'custom'; url: string }
 
 export function resolveIcon(
   ref: string | undefined,
@@ -75,11 +74,41 @@ export function emptyIconLibrary(): IconLibrary {
 }
 
 export const ICON_SETS: Omit<IconSet, 'id'>[] = [
-  { prefix: 'lucide', name: 'Lucide', provider: 'Iconify', license: 'ISC', samples: ['home', 'heart', 'star', 'settings'] },
-  { prefix: 'ph', name: 'Phosphor', provider: 'Iconify', license: 'MIT', samples: ['house', 'heart', 'star', 'gear'] },
-  { prefix: 'heroicons', name: 'Heroicons', provider: 'Iconify', license: 'MIT', samples: ['home', 'heart', 'star', 'cog-6-tooth'] },
-  { prefix: 'tabler', name: 'Tabler Icons', provider: 'Iconify', license: 'MIT', samples: ['home', 'heart', 'star', 'settings'] },
-  { prefix: 'feather', name: 'Feather', provider: 'Iconify', license: 'MIT', samples: ['home', 'heart', 'star', 'settings'] },
+  {
+    prefix: 'lucide',
+    name: 'Lucide',
+    provider: 'Iconify',
+    license: 'ISC',
+    samples: ['home', 'heart', 'star', 'settings'],
+  },
+  {
+    prefix: 'ph',
+    name: 'Phosphor',
+    provider: 'Iconify',
+    license: 'MIT',
+    samples: ['house', 'heart', 'star', 'gear'],
+  },
+  {
+    prefix: 'heroicons',
+    name: 'Heroicons',
+    provider: 'Iconify',
+    license: 'MIT',
+    samples: ['home', 'heart', 'star', 'cog-6-tooth'],
+  },
+  {
+    prefix: 'tabler',
+    name: 'Tabler Icons',
+    provider: 'Iconify',
+    license: 'MIT',
+    samples: ['home', 'heart', 'star', 'settings'],
+  },
+  {
+    prefix: 'feather',
+    name: 'Feather',
+    provider: 'Iconify',
+    license: 'MIT',
+    samples: ['home', 'heart', 'star', 'settings'],
+  },
   {
     prefix: 'material-symbols',
     name: 'Material Symbols',
@@ -87,8 +116,20 @@ export const ICON_SETS: Omit<IconSet, 'id'>[] = [
     license: 'Apache-2.0',
     samples: ['home', 'favorite', 'star', 'settings'],
   },
-  { prefix: 'ri', name: 'Remix Icon', provider: 'Iconify', license: 'Apache-2.0', samples: ['home-line', 'heart-line', 'star-line', 'settings-line'] },
-  { prefix: 'bi', name: 'Bootstrap Icons', provider: 'Iconify', license: 'MIT', samples: ['house', 'heart', 'star', 'gear'] },
+  {
+    prefix: 'ri',
+    name: 'Remix Icon',
+    provider: 'Iconify',
+    license: 'Apache-2.0',
+    samples: ['home-line', 'heart-line', 'star-line', 'settings-line'],
+  },
+  {
+    prefix: 'bi',
+    name: 'Bootstrap Icons',
+    provider: 'Iconify',
+    license: 'MIT',
+    samples: ['house', 'heart', 'star', 'gear'],
+  },
 ]
 
 const ICONIFY_API = 'https://api.iconify.design'

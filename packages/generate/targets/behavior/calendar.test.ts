@@ -115,7 +115,10 @@ describe('range selection', () => {
     const { weeks } = buildCalendar({
       displayedMonth: jul2026,
       mode: 'range',
-      selection: { start: { year: 2026, month: 7, day: 10 }, end: { year: 2026, month: 7, day: 14 } },
+      selection: {
+        start: { year: 2026, month: 7, day: 10 },
+        end: { year: 2026, month: 7, day: 14 },
+      },
     })
     expect(at(weeks, 10).states.rangeStart).toBe(true)
     expect(at(weeks, 14).states.rangeEnd).toBe(true)
@@ -129,7 +132,10 @@ describe('range selection', () => {
     const { weeks } = buildCalendar({
       displayedMonth: jul2026,
       mode: 'range',
-      selection: { start: { year: 2026, month: 7, day: 20 }, end: { year: 2026, month: 7, day: 16 } },
+      selection: {
+        start: { year: 2026, month: 7, day: 20 },
+        end: { year: 2026, month: 7, day: 16 },
+      },
     })
     expect(at(weeks, 16).states.rangeStart).toBe(true)
     expect(at(weeks, 20).states.rangeEnd).toBe(true)

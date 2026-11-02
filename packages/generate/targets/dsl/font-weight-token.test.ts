@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { readCss } from '../web/react/testkit'
 import { parseMildaDocument } from '@mildastudio/milda'
 import { documentToIr, foundationsToIr } from './toIr'
 import { toComponentStyles } from '../web/react/emit'
@@ -25,10 +26,11 @@ describe('font-weight token type → IR + CSS', () => {
     const tok = foundations.layers[0].tokens[0]
     expect(tok.id).toBe('weight-bold')
     expect(tok.type).toBe('fontWeight')
-    expect(tok.value).toEqual({ kind: 'fixed', slot: { raw: '700' } })
+    expect(tok.value).toEqual({ base: { raw: '700' } })
   })
 
   it('emits the weight facet against the fontWeight-scale var (definition + reference agree)', () => {
-    expect(toComponentStyles(heading)).toContain('font-weight: var(--ds-fontWeight-weight-bold)')
+    const css = readCss(toComponentStyles(heading))
+    expect(css.decl(css.selectors[0]!, 'font-weight')).toBe('var(--ds-fontWeight-weight-bold)')
   })
 })

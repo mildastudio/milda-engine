@@ -15,7 +15,7 @@ const SIGNAL_INTERACTION: Record<string, InteractionKind> = {
   closed: 'close',
   dismissRequested: 'dismiss',
   commit: 'change',
-  // Proposal 0034 §B — signals that previously produced no default event:
+  // Proposal 0034 §B - signals that previously produced no default event:
   toggle: 'change', // disclosure composite → onToggle
   submitStart: 'activate', // submission → onSubmit
   submitSuccess: 'change', // submission → onSubmitSuccess

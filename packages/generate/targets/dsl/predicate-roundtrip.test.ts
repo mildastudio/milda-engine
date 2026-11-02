@@ -10,14 +10,30 @@ import {
 import { documentToDsl } from './emit'
 import { documentToIr } from './toIr'
 
-function n(p: Partial<ComponentNode> & Pick<ComponentNode, 'id' | 'kind' | 'parentId'>): ComponentNode {
-  return { name: p.id, tag: 'auto', origin: p.parentId === null ? 'root' : 'author', locked: false, childrenIds: [], ...p } as ComponentNode
+function n(
+  p: Partial<ComponentNode> & Pick<ComponentNode, 'id' | 'kind' | 'parentId'>,
+): ComponentNode {
+  return {
+    name: p.id,
+    tag: 'auto',
+    origin: p.parentId === null ? 'root' : 'author',
+    locked: false,
+    childrenIds: [],
+    ...p,
+  } as ComponentNode
 }
 
-// Emit a whole document, parse it back, lower to IR — then hand back the reconstructed
+// Emit a whole document, parse it back, lower to IR - then hand back the reconstructed
 // `Widget` component so a test can assert its predicates survived the round-trip.
 function roundTrip(badge: ComponentNode): ComponentIR {
-  const root = n({ id: 'root', kind: 'container', tag: 'div', parentId: null, part: 'root', childrenIds: ['badge'] })
+  const root = n({
+    id: 'root',
+    kind: 'container',
+    tag: 'div',
+    parentId: null,
+    part: 'root',
+    childrenIds: ['badge'],
+  })
   const comp: ComponentIR = {
     name: 'Widget',
     archetype: null,
@@ -42,14 +58,21 @@ function roundTrip(badge: ComponentNode): ComponentIR {
   return widget
 }
 
+// A part's path is its position in the tree (proposal 0041) - that is what lets the reader
+// rebuild nesting, and printing a flat `option-indicator` for `option.indicator` used to make
+// every nested node come back a sibling of its parent. The path is relative to the ROOT,
+// though: the reader attaches a dotless part to the first-declared one, so a direct child of
+// the root keeps the name its author gave it. Printing `root.badge` renamed the part.
 function badgeNode(widget: ComponentIR): ComponentNode {
   const node = Object.values(widget.structure!.nodes).find((nd) => nd.part === 'badge')
   if (!node) throw new Error('badge node missing after round-trip')
+  const root = Object.values(widget.structure!.nodes).find((nd) => nd.part === 'root')
+  expect(node.parentId).toBe(root?.id)
   return node
 }
 
 describe('DSL predicate round-trip (0032 import parser)', () => {
-  it('round-trips a rich StateRule.when — and/or/not, nested groups, every operator, state/context/ancestor leaves', () => {
+  it('round-trips a rich StateRule.when - and/or/not, nested groups, every operator, state/context/ancestor leaves', () => {
     const when: Predicate = {
       kind: 'all',
       items: [
@@ -59,12 +82,20 @@ describe('DSL predicate round-trip (0032 import parser)', () => {
         { kind: 'cmp', ref: { kind: 'prop', path: 'size' }, op: 'lte', value: 20 },
         { kind: 'cmp', ref: { kind: 'prop', path: 'size' }, op: 'gt', value: 1 },
         { kind: 'cmp', ref: { kind: 'prop', path: 'count' }, op: 'ne', value: 0 },
-        { kind: 'not', item: { kind: 'cmp', ref: { kind: 'prop', path: 'label' }, op: 'contains', value: '@' } },
+        {
+          kind: 'not',
+          item: { kind: 'cmp', ref: { kind: 'prop', path: 'label' }, op: 'contains', value: '@' },
+        },
         {
           kind: 'any',
           items: [
             { kind: 'cmp', ref: { kind: 'state', state: 'error' }, op: 'set' },
-            { kind: 'cmp', ref: { kind: 'context', group: 'ColorScheme' }, op: 'eq', value: 'dark' },
+            {
+              kind: 'cmp',
+              ref: { kind: 'context', group: 'ColorScheme' },
+              op: 'eq',
+              value: 'dark',
+            },
             { kind: 'cmp', ref: { kind: 'ancestor', nodeId: 'card', state: 'hovered' }, op: 'set' },
           ],
         },
@@ -84,7 +115,7 @@ describe('DSL predicate round-trip (0032 import parser)', () => {
     expect(rule?.when).toEqual(when)
   })
 
-  it('round-trips a node.presence gate — or / context / state leaves', () => {
+  it('round-trips a node.presence gate - or / context / state leaves', () => {
     const presence: Predicate = {
       kind: 'any',
       items: [
@@ -92,17 +123,27 @@ describe('DSL predicate round-trip (0032 import parser)', () => {
         { kind: 'cmp', ref: { kind: 'state', state: 'error' }, op: 'set' },
       ],
     }
-    const badge = n({ id: 'badge', kind: 'text', tag: 'span', parentId: 'root', part: 'badge', presence })
+    const badge = n({
+      id: 'badge',
+      kind: 'text',
+      tag: 'span',
+      parentId: 'root',
+      part: 'badge',
+      presence,
+    })
 
     expect(badgeNode(roundTrip(badge)).presence).toEqual(presence)
   })
 
-  it('preserves semantics — the reconstructed predicate evaluates identically to the original', () => {
+  it('preserves semantics - the reconstructed predicate evaluates identically to the original', () => {
     const when: Predicate = {
       kind: 'all',
       items: [
         { kind: 'cmp', ref: { kind: 'prop', path: 'variant' }, op: 'eq', value: 'primary' },
-        { kind: 'not', item: { kind: 'cmp', ref: { kind: 'prop', path: 'size' }, op: 'gte', value: 3 } },
+        {
+          kind: 'not',
+          item: { kind: 'cmp', ref: { kind: 'prop', path: 'size' }, op: 'gte', value: 3 },
+        },
       ],
     }
     const badge = n({
@@ -129,7 +170,12 @@ describe('DSL predicate round-trip (0032 import parser)', () => {
   it('still accepts the legacy single-condition `when prop = value`', () => {
     // A single `eq` leaf is the degenerate case the flat legacy form covered; it emits as a
     // bare `when variant = primary { … }` and parses straight back to the same leaf.
-    const when: Predicate = { kind: 'cmp', ref: { kind: 'prop', path: 'variant' }, op: 'eq', value: 'primary' }
+    const when: Predicate = {
+      kind: 'cmp',
+      ref: { kind: 'prop', path: 'variant' },
+      op: 'eq',
+      value: 'primary',
+    }
     const badge = n({
       id: 'badge',
       kind: 'text',

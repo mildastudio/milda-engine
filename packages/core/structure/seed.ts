@@ -13,7 +13,10 @@ import {
 } from './types'
 import { defaultEventName, interactionForSignal } from './signals'
 
-const ROLE_TO_KIND: Record<PartRole, NodeKind> = {
+/** What an anatomy role IS as a node. Exported because the `.milda` reader needs the same
+ *  answer: a file names a part without saying what it is, and the archetype's role is a
+ *  better source for that than inferring it from whatever paint the part carries. */
+export const ROLE_TO_KIND: Record<PartRole, NodeKind> = {
   container: 'container',
   item: 'item',
   text: 'text',
@@ -106,8 +109,8 @@ function build(
               accepts: { kind: 'content' as const },
               // A born collection's item is a lone template (no real items yet), so
               // its label would otherwise show only the bracketed "content goes
-              // here" placeholder. A generic design-time text sample — never bound,
-              // never generated — reads it as a filled row instead, matching the
+              // here" placeholder. A generic design-time text sample - never bound,
+              // never generated - reads it as a filled row instead, matching the
               // repeated static option's own "One/Two/Three" placeholder spirit.
               ...(underItem ? { sample: { kind: 'text' as const, text: 'Item' } } : {}),
             },
@@ -183,10 +186,10 @@ export function seedStructure(
 // is a MULTILINE field (textarea, not a single-line input); a Stepper steps a
 // NUMBER (so the born field types/steps numerically and the generator's stepper
 // plan can attach). A bare trigger with no anatomy children of its own (Tooltip's,
-// Popover's) isn't a design-system-owned button — it wraps WHATEVER the consumer
+// Popover's) isn't a design-system-owned button - it wraps WHATEVER the consumer
 // hovers/clicks (Radix's `asChild`), so it's the component's default content slot
 // instead: `{children}` in the generated code, a design-time text sample on the
-// canvas (never bound, never generated — same status as a repeated item's sample).
+// canvas (never bound, never generated - same status as a repeated item's sample).
 const PART_OVERRIDES: Record<string, Record<string, Partial<ComponentNode>>> = {
   TextArea: { control: { tag: 'textarea' } },
   Stepper: { control: { value: { type: { kind: 'number' } } } },
@@ -202,7 +205,7 @@ const PART_OVERRIDES: Record<string, Record<string, Partial<ComponentNode>>> = {
   },
 }
 
-// A tooltip's trigger is DESCRIBED by its own tip text (WAI-ARIA: aria-describedby —
+// A tooltip's trigger is DESCRIBED by its own tip text (WAI-ARIA: aria-describedby -
 // a supplement to whatever name the consumer's wrapped content already carries, never
 // a replacement for it, unlike labelledBy). This relationship is intrinsic to what a
 // Tooltip IS, not an authoring choice per instance, so it's seeded once here rather
@@ -286,7 +289,7 @@ export const GROUP_VARIANT_STYLE: Record<'radio' | 'segmented', GroupVariantStyl
       facets: {
         fill: 'surface',
         // Roundness is intrinsic to a radio (a square dot reads as a checkbox), so it is a
-        // raw circle rather than the `pill` radius token — this way it survives even a
+        // raw circle rather than the `pill` radius token - this way it survives even a
         // token-less (empty) project and never follows a re-themed pill radius.
         corner: '50%',
         'border.width': 'thin',
@@ -328,7 +331,7 @@ type GroupLeaf = (typeof GROUP_LEAVES)[number]
 const GROUP_ARCHETYPES = new Set(['ChoiceGroup'])
 
 // Collections read as a lone item template are unrecognisable, so the studio seeds them
-// born with a 3-item static sample ("One/Two/Three") — a design-time sample the author
+// born with a 3-item static sample ("One/Two/Three") - a design-time sample the author
 // replaces by binding a prop or editing items (never bound, never generated). Proposal
 // 0034 §C generalizes what ChoiceGroup already did to every collection whose repeatable
 // unit is a single `item`-role part. Table (nested column/row/cell items) and Tabs (its
@@ -450,7 +453,7 @@ function requiredAtomName(ref: string): string | null {
 
 // A required `composes` entry parsed into its atom name + baked-in mode
 // (`selection.multiple` → mode 'multiple', `presentation(dialog)` → mode 'dialog').
-// Returns null for OPTIONAL refs (`async-state?`) — they are opt-in, so they add no
+// Returns null for OPTIONAL refs (`async-state?`) - they are opt-in, so they add no
 // props/events until enabled. Mirrors `parseRef` in apps/studio/lib/archetypes.ts.
 function requiredRef(ref: string): { name: string; mode?: string } | null {
   const trimmed = ref.trim()
@@ -482,7 +485,11 @@ interface AtomValueProp {
 // Ordered so that when several composed atoms would claim `value`, the collection /
 // committed value wins over the free-text draft (Combobox, TagsInput compose both).
 const ATOM_VALUE_API: Array<{ atom: string; mode?: string; props: AtomValueProp[] }> = [
-  { atom: 'selection', mode: 'multiple', props: [{ name: 'value', type: { kind: 'array', item: { kind: 'string' } } }] },
+  {
+    atom: 'selection',
+    mode: 'multiple',
+    props: [{ name: 'value', type: { kind: 'array', item: { kind: 'string' } } }],
+  },
   // single / range / bare selection → one member.
   { atom: 'selection', props: [{ name: 'value', type: { kind: 'string' } }] },
   {
@@ -503,7 +510,10 @@ const ATOM_VALUE_API: Array<{ atom: string; mode?: string; props: AtomValueProp[
       { name: 'step', type: { kind: 'number' }, default: 1 },
     ],
   },
-  { atom: 'value-entry', props: [{ name: 'value', type: { kind: 'string' }, default: '', wireInput: true }] },
+  {
+    atom: 'value-entry',
+    props: [{ name: 'value', type: { kind: 'string' }, default: '', wireInput: true }],
+  },
 ]
 
 // Lower each required value-bearing atom's params into contract props, wiring the
@@ -606,12 +616,22 @@ export function seedArchetypeContract(
   if (pv) {
     props.push({ id: uid(), name: 'value', type: pv.value, description: pv.valueDesc })
     if (pv.bounds) {
-      props.push({ id: uid(), name: 'min', type: pv.value, description: `Earliest selectable ${pv.noun}.` })
-      props.push({ id: uid(), name: 'max', type: pv.value, description: `Latest selectable ${pv.noun}.` })
+      props.push({
+        id: uid(),
+        name: 'min',
+        type: pv.value,
+        description: `Earliest selectable ${pv.noun}.`,
+      })
+      props.push({
+        id: uid(),
+        name: 'max',
+        type: pv.value,
+        description: `Latest selectable ${pv.noun}.`,
+      })
     }
   } else {
     // Generic value/data props (proposal 0034 axis A) for every other input. Pickers
-    // are skipped above — they own their value API (date/color carriers, no numeric
+    // are skipped above - they own their value API (date/color carriers, no numeric
     // min/max) and would otherwise pick up `range`'s numeric bounds.
     applyAtomValueProps(structure, def.composes, props)
   }

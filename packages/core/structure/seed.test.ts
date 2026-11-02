@@ -22,7 +22,7 @@ function loneInput(structure: ComponentStructure) {
   return Object.values(structure.nodes).find((n) => n.kind === 'input')
 }
 
-describe('seedArchetypeContract — atom value props (axis A)', () => {
+describe('seedArchetypeContract - atom value props (axis A)', () => {
   it('value-entry archetypes expose a string `value`, wired to the input node', () => {
     for (const a of ['TextField', 'TextArea', 'SearchField']) {
       const { structure, contract } = build(a)
@@ -77,7 +77,7 @@ describe('seedArchetypeContract — atom value props (axis A)', () => {
   })
 
   it('archetypes with no value-bearing required atom get no value prop', () => {
-    // List composes `selection?` (optional) — opt-in, so no born value prop.
+    // List composes `selection?` (optional) - opt-in, so no born value prop.
     expect(propNames('List')).not.toContain('value')
     expect(propNames('Button')).not.toContain('value')
   })
@@ -89,7 +89,7 @@ function eventNames(archetype: string): string[] {
   return build(archetype).contract.events.map((e) => e.name)
 }
 
-describe('seedArchetypeContract — composite/atom event coverage (axis B)', () => {
+describe('seedArchetypeContract - composite/atom event coverage (axis B)', () => {
   it('Form surfaces submit + submitSuccess + submitError (submission atom)', () => {
     const evs = eventNames('Form')
     expect(evs).toContain('submit')
@@ -121,11 +121,19 @@ describe('seedArchetypeContract — composite/atom event coverage (axis B)', () 
 
 // Proposal 0034 axis C: collections are born with a 3-item sample so they read as a
 // recognizable pattern instead of a lone mystery row.
-describe('bornWithSampleItems — collection starter samples (axis C)', () => {
+describe('bornWithSampleItems - collection starter samples (axis C)', () => {
   const born = (a: string) => seedStructure(a, a, { bornRepeat: bornWithSampleItems(a) })
 
   it('marks the single-item-role collections, not Button/Tabs/Table', () => {
-    for (const a of ['ChoiceGroup', 'List', 'Menu', 'NavigationBar', 'Accordion', 'Wizard', 'Combobox']) {
+    for (const a of [
+      'ChoiceGroup',
+      'List',
+      'Menu',
+      'NavigationBar',
+      'Accordion',
+      'Wizard',
+      'Combobox',
+    ]) {
       expect(bornWithSampleItems(a), a).toBe(true)
     }
     for (const a of ['Button', 'Tabs', 'Table', 'TextField']) {
@@ -146,7 +154,10 @@ describe('bornWithSampleItems — collection starter samples (axis C)', () => {
   it('binds the repeated item label to the sample item so it renders One/Two/Three', () => {
     const nodes = born('Menu').nodes
     const bound = Object.values(nodes).find(
-      (n) => n.content?.default?.kind === 'bind' && n.content.default.propName === 'item.label',
+      (n) =>
+        n.content?.kind === 'dynamic' &&
+        n.content.default.kind === 'bind' &&
+        n.content.default.propName === 'item.label',
     )
     expect(bound).toBeTruthy()
   })

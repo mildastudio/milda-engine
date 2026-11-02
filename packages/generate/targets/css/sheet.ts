@@ -1,14 +1,13 @@
+import type { StyleDecl } from '../web/_shared/decl'
+import { facetCssVar, facetDecls, layoutVarDecls, type LayoutParent } from '../web/_shared'
 import {
-  facetCssVar,
-  facetDecls,
-  layoutVarDecls,
   representablePredicate,
   dataCondAttr,
   type ComponentNode,
+  type FacetResolver,
   type PropCondition,
   type StateName,
   type StateRule,
-  type StyleDecl,
 } from '@mildastudio/core'
 
 export const STATE_SELECTOR: Record<StateName, string> = {
@@ -65,9 +64,14 @@ export function variantDataAttr(prop: string): string {
 
 const leafOf = (node: ComponentNode): string | undefined => node.part?.split('.').pop()
 
-function propsSuffix(props: StateRule['props']): string {
+/** How a prop's value is spelled in a selector. The default is the value as the IR holds it. */
+export type PropValueSpelling = (prop: string, value: unknown) => string
+
+const asIs: PropValueSpelling = (_, v) => String(v)
+
+function propsSuffix(props: StateRule['props'], spell: PropValueSpelling): string {
   return Object.entries(props)
-    .map(([k, v]) => `[${variantDataAttr(k)}="${String(v)}"]`)
+    .map(([k, v]) => `[${variantDataAttr(k)}="${spell(k, v)}"]`)
     .join('')
 }
 
@@ -83,8 +87,12 @@ function statesSuffix(states: readonly StateName[], dataStates?: ReadonlySet<str
   return states.map((s) => stateSel(s, dataStates)).join('')
 }
 
-function ruleSuffix(rule: StateRule, dataStates?: ReadonlySet<string>): string {
-  return `${propsSuffix(rule.props)}${statesSuffix(rule.states, dataStates)}`
+function ruleSuffix(
+  rule: StateRule,
+  dataStates: ReadonlySet<string> | undefined,
+  spell: PropValueSpelling,
+): string {
+  return `${propsSuffix(rule.props, spell)}${statesSuffix(rule.states, dataStates)}`
 }
 
 export function variantProps(node: ComponentNode): string[] {
@@ -95,8 +103,11 @@ export function variantProps(node: ComponentNode): string[] {
   return [...seen]
 }
 
-function ruleDecls(rule: StateRule): StyleDecl[] {
-  const decls = [...layoutVarDecls(rule.layout), ...facetDecls(rule.facets, facetCssVar)]
+function ruleDecls(rule: StateRule, facetVar: FacetResolver, parent?: LayoutParent): StyleDecl[] {
+  const decls = [
+    ...layoutVarDecls(rule.layout, { parent, facet: facetVar }),
+    ...facetDecls(rule.facets, facetVar),
+  ]
   if (rule.states.includes('disabled')) decls.push({ prop: 'pointer-events', value: 'none' })
   return decls
 }
@@ -108,6 +119,11 @@ export interface NodeStyleBinding {
 }
 
 export class StyleSheet {
+  // How a state rule's facet values become CSS. The emitter hands in the same resolver its base
+  // declarations use, so a node and its `:hover` rule cannot disagree about whether a word is a
+  // token or a literal.
+  constructor(private readonly facetVar: FacetResolver = facetCssVar) {}
+
   private names = new Map<string, string>()
   private used = new Map<string, number>()
   private done = new Set<string>()
@@ -116,10 +132,19 @@ export class StyleSheet {
   // depth, so a descendant rule can be emitted as a descendant selector under that ancestor
   // (`.button:hover .icon`). The emitter sets this ONLY for the generic tree-mapped path,
   // where node ancestry equals DOM ancestry; the compound/overlay emitters restructure the
-  // DOM and leave it unset — an anchored rule then falls back to self-scoped (safe).
+  // DOM and leave it unset - an anchored rule then falls back to self-scoped (safe).
   private anchorResolver:
-    | ((nodeId: string) => { node: ComponentNode; depth: number } | undefined)
-    | undefined
+    ((nodeId: string) => { node: ComponentNode; depth: number } | undefined) | undefined
+
+  // How a prop's value is spelled in a `[data-<prop>="…"]` selector. The IR holds the author's
+  // word (`Secondary`); for a prop typed by a context group the attribute the component sets is
+  // the target's spelling of that context (`secondary`, the generated API's own value), so a
+  // selector written as-is would never match. The emitter hands in the spelling it emits.
+  private propValue: PropValueSpelling = asIs
+
+  setPropValueSpelling(fn: PropValueSpelling | undefined): void {
+    this.propValue = fn ?? asIs
+  }
 
   setAnchorResolver(
     fn: ((nodeId: string) => { node: ComponentNode; depth: number } | undefined) | undefined,
@@ -127,7 +152,7 @@ export class StyleSheet {
     this.anchorResolver = fn
   }
 
-  // States this component realizes as `data-<state>` rather than a native pseudo — e.g. a
+  // States this component realizes as `data-<state>` rather than a native pseudo - e.g. a
   // toggle button's `checked`/`pressed`/`selected` (driven by aria-pressed + data-<state>),
   // which `:checked`/`:active` would never match. Set per-component by the emitter.
   private dataStates: ReadonlySet<string> | undefined
@@ -136,14 +161,16 @@ export class StyleSheet {
   }
 
   // Resolves, for a node's self state, the nearest ANCESTOR node that CONTROLS that state (holds
-  // a stateBinding for it) — or undefined. A toggle's `selected` lives as `data-selected` on the
+  // a stateBinding for it) - or undefined. A toggle's `selected` lives as `data-selected` on the
   // ROOT only, never on a fixed part, so a part's `onSelected` rule emitted self-scoped
   // (`.indicator[data-selected]`) is dead in the generated CSS even though the preview restyles it
   // (activeUIStates flows to all parts). When set, `ruleSelector` folds such a self state into an
-  // implicit ancestorState so it emits `.root[data-selected] .indicator` — the generated mirror of
+  // implicit ancestorState so it emits `.root[data-selected] .indicator` - the generated mirror of
   // that cascade. Set (with the anchor resolver) ONLY on the generic tree-mapped path.
   private controlledAnchor: ((nodeId: string, state: StateName) => string | undefined) | undefined
-  setControlledStateAnchor(fn: ((nodeId: string, state: StateName) => string | undefined) | undefined): void {
+  setControlledStateAnchor(
+    fn: ((nodeId: string, state: StateName) => string | undefined) | undefined,
+  ): void {
     this.controlledAnchor = fn
   }
 
@@ -176,10 +203,16 @@ export class StyleSheet {
     if (rule.when) {
       const rep = representablePredicate(rule.when)
       if (rep === null) return `.${name}[${dataCondAttr(rule)}]`
-      rule = { ...rule, when: undefined, props: rep.props, states: rep.states, ancestorStates: rep.ancestorStates }
+      rule = {
+        ...rule,
+        when: undefined,
+        props: rep.props,
+        states: rep.states,
+        ancestorStates: rep.ancestorStates,
+      }
     }
     // Fold any self state that's controlled on an ANCESTOR into an implicit ancestorState (only
-    // when we can actually emit the anchor — anchorResolver present), so `.part[data-selected]`
+    // when we can actually emit the anchor - anchorResolver present), so `.part[data-selected]`
     // (dead: the part never gets data-selected) becomes `.root[data-selected] .part`.
     let eff = rule
     if (this.anchorResolver && this.controlledAnchor && rule.states.length) {
@@ -191,11 +224,15 @@ export class StyleSheet {
         else selfStates.push(s)
       }
       if (synth.length) {
-        eff = { ...rule, states: selfStates, ancestorStates: [...(rule.ancestorStates ?? []), ...synth] }
+        eff = {
+          ...rule,
+          states: selfStates,
+          ancestorStates: [...(rule.ancestorStates ?? []), ...synth],
+        }
       }
     }
 
-    const selfSel = `.${name}${ruleSuffix(eff, this.dataStates)}`
+    const selfSel = `.${name}${ruleSuffix(eff, this.dataStates, this.propValue)}`
     const conds = eff.ancestorStates ?? []
     if (conds.length === 0 || !this.anchorResolver) return selfSel
 
@@ -216,7 +253,7 @@ export class StyleSheet {
     return `${chain} ${selfSel}`
   }
 
-  register(node: ComponentNode, baseDecls: StyleDecl[]): NodeStyleBinding {
+  register(node: ComponentNode, baseDecls: StyleDecl[], parent?: LayoutParent): NodeStyleBinding {
     const rules = node.states ?? []
     const hasBase = baseDecls.length > 0
     const hasRules = rules.length > 0
@@ -226,7 +263,11 @@ export class StyleSheet {
     if (!this.done.has(node.id)) {
       this.done.add(node.id)
       if (hasBase) this.serialize(`.${name}`, baseDecls)
-      for (const rule of rules) this.serialize(this.ruleSelector(name, node.id, rule), ruleDecls(rule))
+      for (const rule of rules)
+        this.serialize(
+          this.ruleSelector(name, node.id, rule),
+          ruleDecls(rule, this.facetVar, parent),
+        )
     }
     return {
       className: name,

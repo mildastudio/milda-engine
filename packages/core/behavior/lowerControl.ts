@@ -1,9 +1,39 @@
+// The STRUCTURAL half of control lowering: which nodes a materialized toggle is made of
+// and how to find them. Neutral by construction - `core/structure/ops.ts` consumes exactly
+// this half (one predicate, one lookup, four part names) and never touched a declaration.
+//
+// The geometry that used to sit below moved out in proposal 0045 phase 2: the numbers to
+// `controlGeometry.ts` beside this file, the CSS to `generate/targets/web/_shared/control.ts`.
 import type { ComponentNode } from '../structure/types'
 import { effectiveValueType } from '../structure/types'
-import type { StyleDecl } from '../facets/facets'
 
+// The realization parts below are recognised by NAME, and a part has two spellings: the Studio
+// stores the bare name (`thumb`), the `.milda` reader the path from the root (`track.thumb`),
+// because the file addresses parts by path. Comparing the last segment makes both answer the
+// same, which is what keeps a materialized toggle materialized through its own file.
+export function partLeaf(node: ComponentNode | undefined): string | undefined {
+  return node?.part?.split('.').pop()
+}
+
+// The hidden native input of the LEGACY materialized form: the contract used to live on a
+// `control`-part input child of the label shell, and `migrateDocument` lifts it onto the shell
+// and drops the node. It is the one boolean input that is not itself a toggle, and the
+// migration asks this same question, so the two cannot disagree about what is legacy.
+export function isLegacyToggleControl(node: ComponentNode): boolean {
+  return node.kind === 'input' && node.part === CHECKBOX_CONTROL_PART && node.parentId != null
+}
+
+// A boolean input realizes as a styled toggle wherever it sits. This used to require `!part`,
+// on the reading that only archetype anatomy has one - but the `.milda` reader gives every node
+// a part, so the demo system's Switch and Checkbox came back from their own file as bare native
+// checkboxes in every target. No archetype seeds a boolean input with a part (BooleanInput's
+// lowered toggle has none), so the legacy control is the only thing the old guard excluded.
 export function isCustomToggle(node: ComponentNode): boolean {
-  return node.kind === 'input' && !node.part && effectiveValueType(node)?.kind === 'boolean'
+  return (
+    node.kind === 'input' &&
+    effectiveValueType(node)?.kind === 'boolean' &&
+    !isLegacyToggleControl(node)
+  )
 }
 
 export function customToggleVariant(node: ComponentNode): 'checkbox' | 'switch' | undefined {
@@ -20,7 +50,7 @@ export function checkboxGlyphChild(
   if (customToggleVariant(node) !== 'checkbox') return undefined
   for (const id of node.childrenIds) {
     const child = nodes[id]
-    if (child?.kind === 'icon' && child.part === CHECKBOX_GLYPH_PART) return child
+    if (child?.kind === 'icon' && partLeaf(child) === CHECKBOX_GLYPH_PART) return child
   }
   return undefined
 }
@@ -48,14 +78,14 @@ export function materializedToggleParts(
   if (node.kind !== 'container') return undefined
   if (effectiveValueType(node)?.kind !== 'boolean') return undefined
   const child = (part: string) =>
-    node.childrenIds.map((id) => nodes[id]).find((c) => c?.part === part)
+    node.childrenIds.map((id) => nodes[id]).find((c) => partLeaf(c) === part)
   const variant: 'checkbox' | 'switch' = node.control?.as ?? 'checkbox'
   if (variant === 'switch') {
     const track = child(SWITCH_TRACK_PART)
     if (!track) return undefined
     const thumb = track.childrenIds
       .map((id) => nodes[id])
-      .find((c) => c?.part === SWITCH_THUMB_PART)
+      .find((c) => partLeaf(c) === SWITCH_THUMB_PART)
     return { variant, track, thumb }
   }
   const indicator = child(CHECKBOX_INDICATOR_PART)
@@ -64,112 +94,4 @@ export function materializedToggleParts(
     .map((id) => nodes[id])
     .find((c): c is ComponentNode => !!c && c.kind === 'icon')
   return { variant, indicator, glyph }
-}
-
-export const CHECKBOX_ROOT_DECLS: StyleDecl[] = [
-  { prop: 'display', value: 'inline-flex' },
-  { prop: 'alignItems', value: 'center' },
-  { prop: 'gap', value: '0.5em' },
-  { prop: 'cursor', value: 'pointer' },
-]
-
-export const SR_ONLY_DECLS: StyleDecl[] = [
-  { prop: 'position', value: 'absolute' },
-  { prop: 'width', value: '1px' },
-  { prop: 'height', value: '1px' },
-  { prop: 'padding', value: '0' },
-  { prop: 'margin', value: '0' },
-  { prop: 'overflow', value: 'hidden' },
-  { prop: 'clipPath', value: 'inset(50%)' },
-  { prop: 'whiteSpace', value: 'nowrap' },
-  { prop: 'border', value: '0' },
-]
-
-export const CHECKBOX_INDICATOR_DECLS: StyleDecl[] = [
-  { prop: 'display', value: 'inline-flex' },
-  { prop: 'alignItems', value: 'center' },
-  { prop: 'justifyContent', value: 'center' },
-  { prop: 'flex', value: 'none' },
-  { prop: 'boxSizing', value: 'border-box' },
-  { prop: 'width', value: '1.15em' },
-  { prop: 'height', value: '1.15em' },
-  { prop: 'border', value: '1px solid currentColor' },
-  { prop: 'borderRadius', value: '0.25em' },
-  { prop: 'color', value: 'inherit' },
-]
-
-export const CHECKBOX_GLYPH_DECLS: StyleDecl[] = [
-  { prop: 'width', value: '0.85em' },
-  { prop: 'height', value: '0.85em' },
-  { prop: 'opacity', value: '0' },
-  { prop: 'transform', value: 'scale(0.7)' },
-]
-
-export const CHECKBOX_GLYPH_CHECKED_DECLS: StyleDecl[] = [
-  { prop: 'opacity', value: '1' },
-  { prop: 'transform', value: 'none' },
-]
-
-export const CHECKBOX_FOCUS_DECLS: StyleDecl[] = [
-  { prop: 'outline', value: '2px solid var(--ds-color-ring, currentColor)' },
-  { prop: 'outlineOffset', value: '2px' },
-]
-
-export const CHECKBOX_DISABLED_DECLS: StyleDecl[] = [
-  { prop: 'opacity', value: '0.5' },
-  { prop: 'cursor', value: 'not-allowed' },
-]
-
-export const SWITCH_TRACK_DECLS: StyleDecl[] = [
-  { prop: 'display', value: 'inline-flex' },
-  { prop: 'alignItems', value: 'center' },
-  { prop: 'flex', value: 'none' },
-  { prop: 'boxSizing', value: 'border-box' },
-  { prop: 'width', value: '40px' },
-  { prop: 'height', value: '24px' },
-  { prop: 'padding', value: '2px' },
-  { prop: 'border', value: '1px solid currentColor' },
-  { prop: 'borderRadius', value: '999px' },
-  { prop: 'color', value: 'inherit' },
-]
-
-export const SWITCH_THUMB_DECLS: StyleDecl[] = [
-  { prop: 'display', value: 'block' },
-  { prop: 'flex', value: 'none' },
-  { prop: 'width', value: '18px' },
-  { prop: 'height', value: '18px' },
-  { prop: 'borderRadius', value: '999px' },
-  { prop: 'backgroundColor', value: 'currentColor' },
-  { prop: 'transform', value: 'translateX(0)' },
-]
-
-export const SWITCH_THUMB_CHECKED_DECLS: StyleDecl[] = [
-  { prop: 'transform', value: 'translateX(16px)' },
-]
-
-export interface ControlTransition {
-  properties: string[]
-  duration: string
-  easing: string
-}
-
-export const CHECKBOX_INDICATOR_TRANSITION: ControlTransition = {
-  properties: ['background-color', 'border-color'],
-  duration: 'fast',
-  easing: 'ease',
-}
-export const CHECKBOX_GLYPH_TRANSITION: ControlTransition = {
-  properties: ['opacity', 'transform'],
-  duration: 'fast',
-  easing: 'ease',
-}
-export const SWITCH_TRACK_TRANSITION: ControlTransition = {
-  properties: ['background-color', 'border-color'],
-  duration: 'fast',
-  easing: 'ease',
-}
-export const SWITCH_THUMB_TRANSITION: ControlTransition = {
-  properties: ['transform', 'background-color'],
-  duration: 'fast',
-  easing: 'ease',
 }

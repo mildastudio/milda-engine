@@ -12,9 +12,9 @@ interface ArchetypePaint {
 }
 
 // Small seed-time state-rule builders (a self-contained counterpart to the
-// example library's `onHover`/`onSelected` helpers — this package doesn't depend
+// example library's `onHover`/`onSelected` helpers - this package doesn't depend
 // on that one). Interaction feedback a born control needs to read as ALIVE
-// (hover, picked) without any author styling — replacing what used to be faked
+// (hover, picked) without any author styling - replacing what used to be faked
 // globally in the editor's fallback stylesheet.
 const stateRule = (states: StateRule['states'], facets: Record<string, string>): StateRule => ({
   id: crypto.randomUUID(),
@@ -75,7 +75,7 @@ const overlaySurface: PartPaint = {
     'border.color': 'border',
   },
   // A born popup surface needs SOME width to read as a real menu/listbox rather
-  // than a content-hugging sliver — the interactive preview overrides this to
+  // than a content-hugging sliver - the interactive preview overrides this to
   // match the trigger (surfacePositionDecls' `minWidth:100%`); this is the design-
   // canvas (and pre-interaction) fallback.
   layout: { direction: 'column', width: 'md' },
@@ -247,7 +247,10 @@ const DEFAULTS: Record<string, ArchetypePaint> = {
         facets: { fill: 'surface-sunken', corner: 'pill' },
         layout: { direction: 'row', align: 'center', width: 'fill', height: '6px' },
       },
-      range: { facets: { fill: 'accent', corner: 'pill' }, layout: { width: '50%', height: 'fill' } },
+      range: {
+        facets: { fill: 'accent', corner: 'pill' },
+        layout: { width: '50%', height: 'fill' },
+      },
       thumb: {
         facets: {
           fill: 'surface',
@@ -343,7 +346,13 @@ const DEFAULTS: Record<string, ArchetypePaint> = {
       eyedropper: {
         ...inputBox,
         facets: { ...inputBox.facets, corner: 'sm', inset: 'xs' },
-        layout: { direction: 'row', align: 'center', distribute: 'center', width: '30px', height: '30px' },
+        layout: {
+          direction: 'row',
+          align: 'center',
+          distribute: 'center',
+          width: '30px',
+          height: '30px',
+        },
       },
       swatches: { facets: { gap: 'xs' }, layout: { direction: 'row', wrap: 'wrap' } },
       input: {
@@ -551,7 +560,7 @@ const DEFAULTS: Record<string, ArchetypePaint> = {
     },
   },
   Tooltip: {
-    // The trigger wraps WHATEVER the consumer hovers/focuses — a real button, a
+    // The trigger wraps WHATEVER the consumer hovers/focuses - a real button, a
     // piece of text, an icon. It carries no chrome of its own (that would fight
     // the wrapped content's own look); it's a default content slot instead (see
     // PART_OVERRIDES in seed.ts), with a design-time sample so a born tooltip
@@ -564,7 +573,7 @@ const DEFAULTS: Record<string, ArchetypePaint> = {
     },
   },
   ContextMenu: {
-    // The root IS the context region (right-click / long-press target) — give it a
+    // The root IS the context region (right-click / long-press target) - give it a
     // visible area so the born component can actually be invoked and styled.
     root: {
       facets: {
@@ -839,7 +848,13 @@ const DEFAULTS: Record<string, ArchetypePaint> = {
   Avatar: {
     root: {
       facets: { fill: 'surface-sunken', ink: 'text-muted', corner: 'pill' },
-      layout: { direction: 'row', align: 'center', distribute: 'center', width: '40px', height: '40px' },
+      layout: {
+        direction: 'row',
+        align: 'center',
+        distribute: 'center',
+        width: '40px',
+        height: '40px',
+      },
     },
     parts: {
       image: { facets: { corner: 'pill' }, layout: { width: 'fill', height: 'fill' } },
@@ -864,7 +879,7 @@ function paint(node: ComponentNode, p?: PartPaint): void {
   if (p.facets) node.facets = { ...p.facets, ...node.facets }
   if (p.layout) node.layout = { ...p.layout, ...node.layout }
   // A freshly-seeded node never already carries states, so this is additive, not
-  // a merge-with-override — but append (rather than replace) to stay future-proof.
+  // a merge-with-override - but append (rather than replace) to stay future-proof.
   if (p.states?.length) node.states = [...p.states, ...(node.states ?? [])]
 }
 
@@ -887,8 +902,8 @@ export function applyArchetypeDefaults(
 
 // Icon-only action parts a born component ships unlabeled (a Dialog's ×, a tag's
 // remove, a pager's arrows): give them their conventional accessible name so the
-// seed is ARIA-conform from birth. Pure a11y intent — realized as aria-label on web,
-// an accessibility label on native — never visible content. The author's own
+// seed is ARIA-conform from birth. Pure a11y intent - realized as aria-label on web,
+// an accessibility label on native - never visible content. The author's own
 // name/label always wins (only set when absent), and a control that will contain
 // visible text names itself from its contents instead.
 const CONTROL_PART_NAMES: Record<string, string> = {

@@ -1,15 +1,21 @@
-import type { ComponentIR, DocumentFoundations } from '@mildastudio/core'
+import { defaultFoundations, type ComponentIR, type DocumentFoundations } from '@mildastudio/core'
 import {
   componentName,
   componentUsesContext,
   resolveTag,
   toComponentFiles,
+  untypedConstraints,
   toIconModule,
   toMildaContextModule,
   type EmitOptions,
 } from './targets/web/react/emit'
 import { themeCss } from './targets/web/react/theme'
-import { CALENDAR_CORE_SOURCE, TIME_CORE_SOURCE, COLOR_CORE_SOURCE } from './targets/behavior/calendarSource.generated'
+import { figmaTarget } from './targets/figma'
+import {
+  CALENDAR_CORE_SOURCE,
+  TIME_CORE_SOURCE,
+  COLOR_CORE_SOURCE,
+} from './targets/behavior/calendarSource.generated'
 
 export interface GeneratedFile {
   path: string
@@ -18,8 +24,64 @@ export interface GeneratedFile {
   code: string
 }
 
+// ─── The target seam (proposal 0045 phase 4) ─────────────────────────────────
+// This interface had exactly one implementation for its whole life, so it had quietly
+// become the shape of the React target rather than the shape of A target. Fitting Figma
+// to it is the test the split was for, and it found two things React had no reason to
+// need:
+//
+//   1. Figma's output unit is the LIBRARY, not the component. One Figma document holds
+//      every component set, so "emit this component" has no answer there - it is not a
+//      smaller version of the same job.
+//   2. Figma is LOSSY and says so. Proposal 0010's doctrine is "lossy / deferred: log,
+//      don't fake", and it names every elevation facet it cannot translate into a Figma
+//      effect. The old interface had nowhere to put that, so the information existed only
+//      on a path that bypassed the seam entirely.
+//
+// Both are now in the interface. React's `skipped` is a claim rather than a formality: the web
+// target expresses everything the IR carries in its RENDERING. What it reports is the one thing a
+// type cannot say - an interface constraint whose condition has no TypeScript form (proposal 0052
+// §4.1) - which the generated component still accepts, and the checker enforces instead.
+
+export interface TargetOutput {
+  files: GeneratedFile[]
+  /**
+   * What this target could not express, in the author's terms. Empty means "nothing was
+   * dropped", so a target that silently discards something is a defect rather than a
+   * matter of degree.
+   */
+  skipped: string[]
+}
+
+/** Everything a target needs from a document to emit a whole library. */
+export interface TargetDocument {
+  // id → IR. The id is what `instance` nodes reference; a bare `ComponentIR` has none.
+  componentsById: Record<string, ComponentIR>
+  foundations?: DocumentFoundations
+  assets?: Record<string, { url?: string }>
+}
+
 export interface Target {
   name: string
+
+  /**
+   * The unit this target emits in. `component` targets can also be driven one component
+   * at a time (see `ComponentTarget`); `library` targets cannot, because their output is
+   * a single document.
+   */
+  granularity: 'component' | 'library'
+
+  /** Emit everything this target produces for one document. */
+  emitDocument(doc: TargetDocument, options?: Record<string, unknown>): TargetOutput
+}
+
+/**
+ * A target that can also emit a single component, plus the shared modules that go beside
+ * it. This is the React shape, and what `generate()` drives - it is a capability some
+ * targets have, not what being a target means.
+ */
+export interface ComponentTarget extends Target {
+  granularity: 'component'
 
   emit(ir: ComponentIR, options?: Record<string, unknown>): GeneratedFile[]
 
@@ -35,8 +97,9 @@ export interface Target {
   context?(): GeneratedFile | null
 }
 
-const reactTarget: Target = {
+const reactTarget: ComponentTarget = {
   name: 'react',
+  granularity: 'component',
   emit: (ir, options) => {
     const name = componentName(ir)
     const { tsx, css } = toComponentFiles(ir, (options ?? {}) as EmitOptions)
@@ -71,10 +134,41 @@ const reactTarget: Target = {
     return code ? { path: 'Icon.tsx', language: 'tsx', code } : null
   },
   context: () => ({ path: 'MildaContext.tsx', language: 'tsx', code: toMildaContextModule() }),
+  emitDocument: (doc, options) => {
+    const files: GeneratedFile[] = [reactTarget.theme(doc.foundations, doc.assets)]
+    const iconModule = reactTarget.icons(doc.foundations, doc.assets)
+    if (iconModule) files.push(iconModule)
+    const components = Object.values(doc.componentsById)
+    if (components.some(componentUsesContext)) {
+      const ctx = reactTarget.context?.()
+      if (ctx) files.push(ctx)
+    }
+    // The shared modules are emitted once here rather than per component, which is what
+    // every caller that loops `emit()` already has to de-duplicate by path.
+    const seen = new Set(files.map((f) => f.path))
+    const emitOptions = { foundations: doc.foundations ?? defaultFoundations(), ...options }
+    for (const ir of components) {
+      for (const file of reactTarget.emit(ir, emitOptions)) {
+        if (seen.has(file.path)) continue
+        seen.add(file.path)
+        files.push(file)
+      }
+    }
+    // Nothing is dropped from what renders: every facet, behavior and length the IR carries has a
+    // web realization. What a type could not narrow is listed (0052 §4.1); asked only of a
+    // component that has a constraint, since the answer for the rest is known to be none.
+    const skipped = components
+      .filter(
+        (c) => c.contract?.constraints?.length || c.contract?.props.some((p) => p.requiredWhen),
+      )
+      .flatMap((c) => untypedConstraints(c, options as EmitOptions))
+    return { files, skipped }
+  },
 }
 
 const targets: Record<string, Target> = {
   react: reactTarget,
+  figma: figmaTarget,
 }
 
 export const TARGETS: string[] = Object.keys(targets)
@@ -83,6 +177,18 @@ export function getTarget(name = 'react'): Target {
   const target = targets[name]
   if (!target) throw new Error(`Unknown generate target: ${name}`)
   return target
+}
+
+/**
+ * A target that can emit one component at a time. Asking a library-granular target for
+ * this is a caller error rather than a missing feature, so it throws by name.
+ */
+export function getComponentTarget(name = 'react'): ComponentTarget {
+  const target = getTarget(name)
+  if (target.granularity !== 'component') {
+    throw new Error(`The ${target.name} target emits a whole library, not one component`)
+  }
+  return target as ComponentTarget
 }
 
 export interface GenerateOptions {
@@ -95,14 +201,23 @@ export interface GenerateOptions {
 }
 
 export function generate(ir: ComponentIR, opts: GenerateOptions = {}): GeneratedFile[] {
-  const target = getTarget(opts.target)
+  const target = getComponentTarget(opts.target)
   const iconModule = target.icons(opts.foundations, opts.assets)
   const contextModule = componentUsesContext(ir) ? (target.context?.() ?? null) : null
   return [
     target.theme(opts.foundations, opts.assets),
     ...(iconModule ? [iconModule] : []),
     ...(contextModule ? [contextModule] : []),
-    ...target.emit(ir, opts.options),
+    // The component reads the token set its theme was written from, defaults included, so a
+    // `var()` is emitted only for a custom property that `theme.css` declares. The context
+    // groups travel with the foundations: a prop typed by a context group is typed as that
+    // group's contexts only when the emitter can see the group, and this is the one road the
+    // release, the CLI and the MCP server all take - without it every such prop was `string`.
+    ...target.emit(ir, {
+      foundations: opts.foundations ?? defaultFoundations(),
+      contextGroups: opts.foundations?.contextGroups,
+      ...opts.options,
+    }),
   ]
 }
 
@@ -115,7 +230,11 @@ export function behaviorPackageFiles(): GeneratedFile[] {
     { path: 'calendar.ts', language: 'ts', code: CALENDAR_CORE_SOURCE },
     { path: 'timepicker.ts', language: 'ts', code: TIME_CORE_SOURCE },
     { path: 'color.ts', language: 'ts', code: COLOR_CORE_SOURCE },
-    { path: 'index.ts', language: 'ts', code: `export * from './calendar'\nexport * from './timepicker'\nexport * from './color'\n` },
+    {
+      path: 'index.ts',
+      language: 'ts',
+      code: `export * from './calendar'\nexport * from './timepicker'\nexport * from './color'\n`,
+    },
   ]
 }
 
@@ -133,6 +252,7 @@ export {
   toComponentSource,
   toComponentStyles,
   toComponentFiles,
+  untypedConstraints,
   toIconModule,
   toMildaContextModule,
 } from './targets/web/react/emit'
@@ -144,8 +264,61 @@ export {
   type EmitOptions,
 } from './targets/web/react/emit'
 export { themeCss } from './targets/web/react/theme'
+// The React binding of a neutral `InteractionKind` (proposal 0050 slice 1). The Studio
+// canvas keys its live handlers off the same function that prints the emitted module's
+// handler props, so the two cannot disagree about what `dismiss` binds to.
+export { reactHandlerProp } from './targets/web/react/interaction'
 
-export { figmaFoundationsExport, figmaComponentExport } from './targets/figma'
+// The web tier's CSS lowering of the IR (proposal 0045) - the `--ds-*` naming scheme,
+// facets/layout as declarations, motion as the `transition` shorthand, the toggle
+// controls, and overlay positioning. Exported because the Studio canvas realizes the SAME
+// declarations the generator emits; a second implementation there is exactly the parity
+// gap `componentRenderParity` guards.
+export {
+  colorVarName,
+  scaleVarName,
+  gradientVarName,
+  textStyleVarName,
+  easingVarName,
+  cssVarRef,
+  BORDER_SIDE_PROPS,
+  FACET_DEFAULTS,
+  baselineDecls,
+  facetBaselineDecls,
+  facetCssVar,
+  facetDecls,
+  facetDefaultValue,
+  LAYOUT_DEFAULTS,
+  WEB_LAYOUT_COVERAGE,
+  layoutBaselineDecls,
+  layoutDecls,
+  layoutVarDecls,
+  type LayoutLoweringOptions,
+  type LayoutParent,
+  motionDecls,
+  timingTransitionDecl,
+  CHECKBOX_DISABLED_DECLS,
+  CHECKBOX_FOCUS_DECLS,
+  CHECKBOX_GLYPH_CHECKED_DECLS,
+  CHECKBOX_GLYPH_DECLS,
+  CHECKBOX_INDICATOR_DECLS,
+  CHECKBOX_ROOT_DECLS,
+  SR_ONLY_DECLS,
+  SWITCH_THUMB_CHECKED_DECLS,
+  SWITCH_THUMB_DECLS,
+  SWITCH_TRACK_DECLS,
+  controlTransitionProps,
+  lengthCss,
+  anchorDecls,
+  backdropDecls,
+  surfacePositionDecls,
+  makeFacetResolver,
+  makeSizeResolver,
+  INTERACTION_DOM_EVENT,
+} from './targets/web/_shared'
+export type { Anchoring, StyleDecl } from './targets/web/_shared'
+
+export { figmaFoundationsExport, figmaComponentExport, figmaTarget } from './targets/figma'
 export type {
   FigmaExportFormat,
   FigmaExportResult,

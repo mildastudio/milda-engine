@@ -1,34 +1,39 @@
+import { COLOR_KEYWORDS } from '@mildastudio/milda'
 import { resolveColorToken } from '../foundations/colorTokens'
 import { resolveScaleToken, type ScaleName } from '../foundations/scales'
-import type { DocumentFoundations } from '../foundations/document'
-import { resolveToken, type TokenResolverContext } from './resolver'
-import { colorVarName, cssVarRef, scaleVarName } from '../tokens'
-import { isLengthType, lengthToCss } from '../foundations/dimensions'
-import { canAcceptChildren, type ComponentNode, type NodeKind } from '../structure/types'
-import { layoutBaselineDecls } from './layout'
+import type { NodeKind } from '../structure/types'
 
 export type FacetScale = 'color' | ScaleName
 
 export interface FacetDef {
   key: string
   label: string
-  scale: FacetScale
+  // A facet is either TOKENIZED - its value is a token id on this scale - or a KEYWORD enum,
+  // where the value IS the value (font-style has nothing to point a token at). Exactly one of
+  // `scale`/`keywords` is set; `facetRegistryProblems` holds that invariant.
+  scale?: FacetScale
+  keywords?: string[]
 }
 
-// Border applies to all sides (`border`) or a single edge — physical (top/right/…) or
+// Border applies to all sides (`border`) or a single edge - physical (top/right/…) or
 // logical (inline-start/…). Each carries width + color + style. `suffix` is the facet
-// key tail (empty for all-sides); `prop` is the CSS property prefix.
-export const BORDER_SIDES: { suffix: string; prop: string; label: string }[] = [
-  { suffix: '', prop: 'border', label: '' },
-  { suffix: '.top', prop: 'borderTop', label: 'top' },
-  { suffix: '.right', prop: 'borderRight', label: 'right' },
-  { suffix: '.bottom', prop: 'borderBottom', label: 'bottom' },
-  { suffix: '.left', prop: 'borderLeft', label: 'left' },
-  { suffix: '.inline-start', prop: 'borderInlineStart', label: 'inline-start' },
-  { suffix: '.inline-end', prop: 'borderInlineEnd', label: 'inline-end' },
-  { suffix: '.block-start', prop: 'borderBlockStart', label: 'block-start' },
-  { suffix: '.block-end', prop: 'borderBlockEnd', label: 'block-end' },
-]
+// key tail (empty for all-sides), `label` is how the editor names the edge; both are
+// neutral. The CSS property each side maps to is the web tier's - see
+// `generate/targets/web/_shared/facets.ts`, whose `BORDER_SIDE_PROPS` is keyed on
+// `BorderSideSuffix` so the two lists cannot drift (proposal 0045 §6).
+export const BORDER_SIDES = [
+  { suffix: '', label: '' },
+  { suffix: '.top', label: 'top' },
+  { suffix: '.right', label: 'right' },
+  { suffix: '.bottom', label: 'bottom' },
+  { suffix: '.left', label: 'left' },
+  { suffix: '.inline-start', label: 'inline-start' },
+  { suffix: '.inline-end', label: 'inline-end' },
+  { suffix: '.block-start', label: 'block-start' },
+  { suffix: '.block-end', label: 'block-end' },
+] as const satisfies readonly { suffix: string; label: string }[]
+
+export type BorderSideSuffix = (typeof BORDER_SIDES)[number]['suffix']
 
 export const FACETS: Record<string, FacetDef> = {
   fill: { key: 'fill', label: 'Fill', scale: 'color' },
@@ -46,6 +51,11 @@ export const FACETS: Record<string, FacetDef> = {
   font: { key: 'font', label: 'Font', scale: 'fontFamily' },
   elevation: { key: 'elevation', label: 'Elevation', scale: 'elevation' },
   opacity: { key: 'opacity', label: 'Opacity', scale: 'opacity' },
+
+  // font-style: the typography axis that has no scale to tokenize (0035 §3). Listed in
+  // `KIND_FACETS` for every text-bearing kind, so it MUST be registered here - the editor
+  // reads this registry to label and render each offered facet.
+  slant: { key: 'slant', label: 'Slant', keywords: ['normal', 'italic', 'oblique'] },
 
   ring: { key: 'ring', label: 'Focus ring', scale: 'color' },
 }
@@ -118,12 +128,37 @@ export const KIND_FACETS: Record<NodeKind, string[]> = {
   instance: [],
   table: ['fill', 'corner', 'border.width', 'border.color'],
   row: ['fill', 'ink', 'border.width', 'border.color'],
-  cell: ['fill', 'ink', 'inset', 'border.width', 'border.color', 'text.size', 'text.weight', 'font', 'slant'],
+  cell: [
+    'fill',
+    'ink',
+    'inset',
+    'border.width',
+    'border.color',
+    'text.size',
+    'text.weight',
+    'font',
+    'slant',
+  ],
 }
 
-export interface StyleDecl {
-  prop: string
-  value: string
+// The registry's own invariants, as data so a test can hold them: every facet a kind OFFERS
+// must be registered (the editor labels and renders each offered facet from `FACETS`, so a
+// missing entry is a crash, not a degraded row), and every entry must say how it is valued -
+// a token scale or a keyword enum, never neither and never both.
+export function facetRegistryProblems(): string[] {
+  const problems: string[] = []
+  for (const [kind, keys] of Object.entries(KIND_FACETS)) {
+    for (const key of keys) {
+      if (!FACETS[key])
+        problems.push(`KIND_FACETS.${kind} offers "${key}", which FACETS does not define`)
+    }
+  }
+  for (const [key, def] of Object.entries(FACETS)) {
+    if (!def.scale && !def.keywords)
+      problems.push(`FACETS."${key}" has neither a scale nor keywords`)
+    if (def.scale && def.keywords) problems.push(`FACETS."${key}" has both a scale and keywords`)
+  }
+  return problems
 }
 
 export type FacetResolver = (scale: FacetScale, id?: string) => string | undefined
@@ -134,155 +169,43 @@ export function isRawValue(v: string): boolean {
   )
 }
 
+/**
+ * Could this be a literal, if no token by that name exists? (proposal 0049)
+ *
+ * `isRawValue` answers a DIFFERENT question - "does this look like a literal rather than a token
+ * id" - and it is the DSL's rule as much as the IR's, so it stays untouched: the emitter and the
+ * parser agree on it, and what a `.milda` file means depends on that agreement.
+ *
+ * This one is the fallback gate for a reader that has already asked the foundations and been told
+ * no. That order is what lets a bare number work at last: `600` and `0` cannot be told from a
+ * token id by looking, but a reader that looked it up first knows there is no such token, and can
+ * then take the value at face value. Widening `isRawValue` instead would have made
+ * `text.weight: 600` stop meaning "the token named 600" in documents that have one - and a
+ * Tailwind import produces exactly that.
+ *
+ * A misspelled id (`acent-3`) is still nothing rather than a literal, which is the point of
+ * keeping a gate at all: emitting `background: acent-3` would be worse than emitting nothing.
+ *
+ * The language's colour keywords (`transparent`) pass too, and for the same reason the bare
+ * number does: a word cannot be told from a token id by looking, so it is a literal only once no
+ * token claims it. The list is the language's (`COLOR_KEYWORDS`), so the validator that accepts
+ * the word and the targets that render it cannot disagree about which words those are. Each
+ * target then needs a value for the word - `parseCssColor` is core's.
+ */
+export function couldBeLiteral(v: string): boolean {
+  return isRawValue(v) || /^-?\d+(\.\d+)?$/.test(v) || colorKeywords.has(v)
+}
+
+const colorKeywords: ReadonlySet<string> = new Set(COLOR_KEYWORDS)
+
 export const resolveFacet: FacetResolver = (scale, id) => {
   if (!id) return undefined
   return scale === 'color' ? resolveColorToken(id) : resolveScaleToken(scale, id)
 }
 
-export const facetCssVar: FacetResolver = (scale, id) => {
-  if (!id) return undefined
-  return cssVarRef(scale === 'color' ? colorVarName(id) : scaleVarName(scale, id))
-}
-
-export function makeFacetResolver(
-  f: DocumentFoundations,
-  context?: TokenResolverContext,
-): FacetResolver {
-  return (scale, id) => {
-    const v = resolveToken(id, f, context, scale)
-    return v != null && isLengthType(scale) ? lengthToCss(v) : v
-  }
-}
-
-export function facetDecls(
-  facets: Record<string, string> | undefined,
-  resolve: FacetResolver = resolveFacet,
-): StyleDecl[] {
-  if (!facets) return []
-  const out: StyleDecl[] = []
-  const push = (prop: string, value?: string) => {
-    if (value != null) out.push({ prop, value })
-  }
-
-  const v = (key: string) => {
-    const id = facets[key]
-    if (id == null) return undefined
-    return isRawValue(id) ? id : resolve(FACETS[key].scale, id)
-  }
-
-  if (facets.fill) push('background', v('fill'))
-  if (facets.ink) push('color', v('ink'))
-  if (facets.corner) push('borderRadius', v('corner'))
-  if (facets.inset) push('padding', v('inset'))
-
-  if (facets.insetX) {
-    push('paddingLeft', v('insetX'))
-    push('paddingRight', v('insetX'))
-  }
-  if (facets.insetY) {
-    push('paddingTop', v('insetY'))
-    push('paddingBottom', v('insetY'))
-  }
-  if (facets.gap) push('gap', v('gap'))
-  if (facets.opacity) push('opacity', v('opacity'))
-  if (facets.elevation) push('boxShadow', v('elevation'))
-  if (facets.ring) {
-    push('outline', `2px solid ${v('ring') ?? 'currentColor'}`)
-    push('outlineOffset', '2px')
-  }
-  for (const { suffix, prop } of BORDER_SIDES) {
-    const style = facets[`border${suffix}.style`]
-    if (facets[`border${suffix}.color`] || facets[`border${suffix}.width`] || style) {
-      push(`${prop}Style`, style ?? 'solid') // style is a keyword, emitted as-is
-      push(`${prop}Width`, v(`border${suffix}.width`) ?? '1px')
-      push(`${prop}Color`, v(`border${suffix}.color`) ?? 'currentColor')
-    }
-  }
-  if (facets['text.size']) push('fontSize', v('text.size'))
-  if (facets['text.weight']) push('fontWeight', v('text.weight'))
-  if (facets.font) push('fontFamily', v('font'))
-  // font-style is an enum keyword (normal|italic|oblique), not a token — emit as-is.
-  if (facets.slant) push('fontStyle', facets.slant)
-  return out
-}
-
-export const FACET_DEFAULTS: Record<string, StyleDecl[]> = {
-  fill: [{ prop: 'background', value: 'transparent' }],
-  ink: [{ prop: 'color', value: 'inherit' }],
-  corner: [{ prop: 'borderRadius', value: '0' }],
-  inset: [{ prop: 'padding', value: '0' }],
-  insetX: [
-    { prop: 'paddingLeft', value: '0' },
-    { prop: 'paddingRight', value: '0' },
-  ],
-  insetY: [
-    { prop: 'paddingTop', value: '0' },
-    { prop: 'paddingBottom', value: '0' },
-  ],
-  gap: [{ prop: 'gap', value: '0' }],
-
-  'border.width': [
-    { prop: 'borderStyle', value: 'solid' },
-    { prop: 'borderWidth', value: '0' },
-    { prop: 'borderColor', value: 'currentColor' },
-  ],
-  'border.color': [
-    { prop: 'borderStyle', value: 'solid' },
-    { prop: 'borderWidth', value: '0' },
-    { prop: 'borderColor', value: 'currentColor' },
-  ],
-  'text.size': [{ prop: 'fontSize', value: 'inherit' }],
-  'text.weight': [{ prop: 'fontWeight', value: 'inherit' }],
-  font: [{ prop: 'fontFamily', value: 'inherit' }],
-  slant: [{ prop: 'fontStyle', value: 'normal' }],
-  elevation: [{ prop: 'boxShadow', value: 'none' }],
-  opacity: [{ prop: 'opacity', value: '1' }],
-  ring: [{ prop: 'outline', value: 'none' }],
-}
-
-export function facetDefaultValue(key: string): string | undefined {
-  const decls = FACET_DEFAULTS[key]
-  return decls?.[0]?.value
-}
-
-const COVERED_BY_SHORTHAND: Record<string, string> = {
-  paddingLeft: 'padding',
-  paddingRight: 'padding',
-  paddingTop: 'padding',
-  paddingBottom: 'padding',
-}
-
-export function facetBaselineDecls(kind: NodeKind): StyleDecl[] {
-  const out: StyleDecl[] = []
-  const seen = new Set<string>()
-  for (const key of KIND_FACETS[kind] ?? []) {
-    for (const d of FACET_DEFAULTS[key] ?? []) {
-      if (seen.has(d.prop)) continue
-      const covering = COVERED_BY_SHORTHAND[d.prop]
-      if (covering && seen.has(covering)) continue
-      seen.add(d.prop)
-      out.push(d)
-    }
-  }
-  return out
-}
-
-const TABLE_DISPLAY: Partial<Record<NodeKind, string>> = {
-  table: 'table',
-  row: 'table-row',
-  cell: 'table-cell',
-}
-
-export function baselineDecls(node: ComponentNode): StyleDecl[] {
-  const tableDisplay = TABLE_DISPLAY[node.kind]
-  const layout = tableDisplay
-    ? [
-        { prop: 'display', value: tableDisplay },
-        { prop: 'width', value: 'auto' },
-        { prop: 'height', value: 'auto' },
-      ]
-    : canAcceptChildren(node)
-      ? layoutBaselineDecls()
-      : []
-  return [...layout, ...facetBaselineDecls(node.kind)]
-}
+// `makeFacetResolver` used to be here, and it handed out CSS: it ran a token through
+// `lengthToCss`, so core answered "8px" - a unit, from the package whose whole rule is that it
+// owns a design system's numbers and never a unit or a property name (invariant 2). Proposal 0045
+// evicted the rest of the web lowering and missed this one because its only caller is the
+// Studio's preview, which wants CSS and so never complained. It lives in
+// `generate/targets/web/_shared/resolvers.ts` now, next to every other CSS word.

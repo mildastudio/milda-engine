@@ -1,11 +1,12 @@
 import { describe, expect, it } from 'vitest'
+import { readCss } from '../web/react/testkit'
 import { parseMildaDocument } from '@mildastudio/milda'
 import { documentToIr, foundationsToIr } from './toIr'
 import { toComponentStyles } from '../web/react/emit'
 
 // milda ids are `tok.`-prefixed and dotted (`tok.space.2`); the editor + CSS var names
 // need the dot-free, hyphenated form (`space-2`). Token DEFINITIONS and REFERENCES must
-// normalize identically, or the emitted `var(--ds-…)` won't match the theme's var — and
+// normalize identically, or the emitted `var(--ds-…)` won't match the theme's var - and
 // dotted ids trip `isRawValue`, leaking the raw `tok.space.2` string into the CSS.
 const dsl = [
   'foundations {',
@@ -34,8 +35,13 @@ describe('DSL → IR token id normalization', () => {
   })
 
   it('emits a valid CSS var reference, not the raw milda id', () => {
-    const css = toComponentStyles(box)
-    expect(css).toContain('var(--ds-spacing-space-2)')
-    expect(css).not.toContain('tok.space')
+    const parsed = readCss(toComponentStyles(box))
+    const selector = parsed.selectors[0]!
+    // gap/insetX/insetY all normalize to the same token, so all three declarations must
+    // carry the resolved variable - checking one value "appears somewhere" would pass
+    // even if only one of the three had been normalized.
+    expect(parsed.decl(selector, 'gap')).toBe('var(--ds-spacing-space-2)')
+    const values = [...parsed.rules.values()].flatMap((r) => [...r.values()])
+    expect(values.some((v) => v.includes('tok.space'))).toBe(false)
   })
 })

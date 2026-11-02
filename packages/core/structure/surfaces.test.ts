@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { seedStructure } from './seed'
 import { setAlertSeverity, setRating, setTabs, setOverlay, setAccordionMode } from './ops'
 
-// Proposal 0034 — per-archetype config surfaces. Alert severity is a paint variant
+// Proposal 0034 - per-archetype config surfaces. Alert severity is a paint variant
 // (repaints facets); the rest are plain config objects stored on the node.
 
 describe('per-archetype config surfaces (0034)', () => {
@@ -34,7 +34,10 @@ describe('per-archetype config surfaces (0034)', () => {
 
     const tabs0 = seedStructure('Tabs', 'Tabs')
     const tabs1 = setTabs(tabs0, tabs0.rootId, { orientation: 'vertical', activation: 'manual' })
-    expect(tabs1.nodes[tabs1.rootId].tabs).toEqual({ orientation: 'vertical', activation: 'manual' })
+    expect(tabs1.nodes[tabs1.rootId].tabs).toEqual({
+      orientation: 'vertical',
+      activation: 'manual',
+    })
 
     const acc0 = seedStructure('Accordion', 'Accordion')
     const acc1 = setAccordionMode(acc0, acc0.rootId, 'multiple')

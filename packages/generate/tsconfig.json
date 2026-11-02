@@ -1,14 +1,14 @@
 {
   "extends": "../../tsconfig.base.json",
-  "include": [
-    "**/*.ts"
-  ],
+  "include": ["**/*.ts"],
   "exclude": [
     "node_modules",
     "targets/behavior/genCalendarSource.ts",
-    "targets/behavior/calendar.test.ts"
+    "targets/behavior/calendar.test.ts",
+    "targets/dsl/document-roundtrip.test.ts"
   ],
   "compilerOptions": {
-    "incremental": false
+    "incremental": false,
+    "types": ["node"]
   }
 }

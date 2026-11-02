@@ -1,13 +1,14 @@
-import { propTypeLabel } from '@mildastudio/core'
+import { predicateText, propTypeLabel } from '@mildastudio/core'
 import type { ContractDigest, ComponentDigest, PropDigest, EventDigest, SlotDigest } from './digest'
 import { typesEqual, inputChangeSeverity, outputChangeSeverity } from './variance'
 
 export type Severity = 'major' | 'minor' | 'patch'
 
-export type ChangeKind = 'component' | 'prop' | 'event' | 'slot'
+export type ChangeKind = 'component' | 'prop' | 'event' | 'slot' | 'constraint' | 'rule'
 
 export interface Change {
-  severity: 'major' | 'minor'
+  // `patch` is a usage rule's: it is reported, and it never moves the version (0052 §9).
+  severity: Severity
   kind: ChangeKind
 
   component: string
@@ -91,14 +92,18 @@ function diffComponent(name: string, prev: ComponentDigest, next: ComponentDiges
   const add = (severity: 'major' | 'minor', kind: ChangeKind, member: string, summary: string) =>
     changes.push({ severity, kind, component: name, member, summary })
 
-  // Props — every aspect of one prop merges into a single human sentence.
+  // Props - every aspect of one prop merges into a single human sentence.
   const props = pairMembers(prev.props, next.props)
   for (const { name: p, d } of props.added) {
+    // A conditionally required prop is required in some existing use the moment it exists.
+    const strict = d.required || d.requiredWhen !== undefined
     add(
-      d.required ? 'major' : 'minor',
+      strict ? 'major' : 'minor',
       'prop',
       p,
-      `Added ${d.required ? 'required' : 'optional'} prop \`${p}\` to \`${name}\``,
+      d.requiredWhen && !d.required
+        ? `Added prop \`${p}\` to \`${name}\`, required when ${predicateText(d.requiredWhen)}`
+        : `Added ${d.required ? 'required' : 'optional'} prop \`${p}\` to \`${name}\``,
     )
   }
   for (const { name: p } of props.removed) {
@@ -111,12 +116,27 @@ function diffComponent(name: string, prev: ComponentDigest, next: ComponentDiges
       sev = sev === 'major' || s === 'major' ? 'major' : 'minor'
     }
     if (!typesEqual(a.type, b.type)) {
-      clauses.push(`changed from type \`${propTypeLabel(a.type)}\` to type \`${propTypeLabel(b.type)}\``)
+      clauses.push(
+        `changed from type \`${propTypeLabel(a.type)}\` to type \`${propTypeLabel(b.type)}\``,
+      )
       raise(inputChangeSeverity(a.type, b.type))
     }
     if (a.required !== b.required) {
       clauses.push(`became ${b.required ? 'required' : 'optional'}`)
       raise(b.required ? 'major' : 'minor')
+    }
+    // A condition is a contract fact (0052 §4): gaining one or changing one can reject a use that
+    // compiled yesterday; losing one cannot.
+    const whenA = a.requiredWhen ? JSON.stringify(a.requiredWhen) : ''
+    const whenB = b.requiredWhen ? JSON.stringify(b.requiredWhen) : ''
+    if (whenA !== whenB) {
+      if (!b.requiredWhen) {
+        clauses.push('is no longer conditionally required')
+        raise('minor')
+      } else {
+        clauses.push(`became required when ${predicateText(b.requiredWhen)}`)
+        raise('major')
+      }
     }
     if (prevName !== nextName) {
       clauses.push(`was renamed to \`${nextName}\``)
@@ -127,17 +147,29 @@ function diffComponent(name: string, prev: ComponentDigest, next: ComponentDiges
     }
   }
 
+  // Group constraints (0052 §4), keyed by what they say: a new one can reject an existing use,
+  // a dropped one cannot.
+  const before = new Set(prev.constraints ?? [])
+  const after = new Set(next.constraints ?? [])
+  for (const k of after)
+    if (!before.has(k)) add('major', 'constraint', k, `Added the constraint ${k} to \`${name}\``)
+  for (const k of before)
+    if (!after.has(k)) add('minor', 'constraint', k, `Removed the constraint ${k} from \`${name}\``)
+
   // Events.
   const events = pairMembers(prev.events, next.events)
-  for (const { name: e } of events.added) add('minor', 'event', e, `Added event \`${e}\` to \`${name}\``)
-  for (const { name: e } of events.removed) add('major', 'event', e, `Removed event \`${e}\` from \`${name}\``)
+  for (const { name: e } of events.added)
+    add('minor', 'event', e, `Added event \`${e}\` to \`${name}\``)
+  for (const { name: e } of events.removed)
+    add('major', 'event', e, `Removed event \`${e}\` from \`${name}\``)
   for (const { prevName, nextName, prev: a, next: b } of events.matched) {
     const clauses: string[] = []
     let sev: 'major' | 'minor' | null = null
     const raise = (s: 'major' | 'minor') => {
       sev = sev === 'major' || s === 'major' ? 'major' : 'minor'
     }
-    const payloadChanged = a.payload || b.payload ? !a.payload || !b.payload || !typesEqual(a.payload, b.payload) : false
+    const payloadChanged =
+      a.payload || b.payload ? !a.payload || !b.payload || !typesEqual(a.payload, b.payload) : false
     if (payloadChanged) {
       clauses.push(
         a.payload && b.payload
@@ -159,12 +191,15 @@ function diffComponent(name: string, prev: ComponentDigest, next: ComponentDiges
 
   // Slots.
   const slots = pairMembers(prev.slots, next.slots)
-  for (const { name: s } of slots.added) add('minor', 'slot', s, `Added slot \`${s}\` to \`${name}\``)
-  for (const { name: s } of slots.removed) add('major', 'slot', s, `Removed slot \`${s}\` from \`${name}\``)
+  for (const { name: s } of slots.added)
+    add('minor', 'slot', s, `Added slot \`${s}\` to \`${name}\``)
+  for (const { name: s } of slots.removed)
+    add('major', 'slot', s, `Removed slot \`${s}\` from \`${name}\``)
   for (const { prevName, nextName, prev: a, next: b } of slots.matched) {
     const clauses: string[] = []
     if (a.arity !== b.arity) clauses.push(`changed arity from ${a.arity} to ${b.arity}`)
-    if (a.accepts !== b.accepts) clauses.push(`changed accepted content from ${a.accepts} to ${b.accepts}`)
+    if (a.accepts !== b.accepts)
+      clauses.push(`changed accepted content from ${a.accepts} to ${b.accepts}`)
     if (prevName !== nextName) clauses.push(`was renamed to \`${nextName}\``)
     if (clauses.length > 0) {
       add('major', 'slot', prevName, `Slot \`${prevName}\` on \`${name}\` ${joinClauses(clauses)}`)
@@ -196,7 +231,7 @@ export function diffDigests(prev: ContractDigest, next: ContractDigest): DiffRes
   }
   for (const { prevName, nextName, prev: a, next: b } of components.matched) {
     if (prevName !== nextName) {
-      // A renamed component changes every consumer's import — major, but ONE
+      // A renamed component changes every consumer's import - major, but ONE
       // coherent change instead of remove+add.
       changes.push({
         severity: 'major',
@@ -206,6 +241,28 @@ export function diffDigests(prev: ContractDigest, next: ContractDigest): DiffRes
       })
     }
     changes.push(...diffComponent(nextName, a, b))
+  }
+
+  // Usage rules: listed, never versioned. Only when BOTH digests carry rules - a digest from
+  // before 0052 is not evidence that every rule is new.
+  if (prev.rules && next.rules) {
+    const rule = (id: string, summary: string) =>
+      changes.push({ severity: 'patch', kind: 'rule', component: '', member: id, summary })
+    for (const [id, r] of Object.entries(next.rules)) {
+      const was = prev.rules[id]
+      if (!was) rule(id, `Added the usage rule \`${id}\` (${r.severity})`)
+      else {
+        if (was.severity !== r.severity)
+          rule(
+            id,
+            `The usage rule \`${id}\` is now ${r.severity === 'error' ? 'an error' : 'a warning'}`,
+          )
+        if (was.statement !== r.statement)
+          rule(id, `The usage rule \`${id}\` now says something else`)
+      }
+    }
+    for (const id of Object.keys(prev.rules))
+      if (!next.rules[id]) rule(id, `Removed the usage rule \`${id}\``)
   }
 
   return { severity: rollup(changes), changes }

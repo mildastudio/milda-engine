@@ -1,6 +1,19 @@
-import type { ComponentIR, DocumentFoundations, SharedType } from '@mildastudio/core'
-import { componentName, componentUsesContext, getTarget, type GeneratedFile } from '@mildastudio/generate'
+import {
+  defaultFoundations,
+  type ComponentIR,
+  type DocumentFoundations,
+  type SharedType,
+} from '@mildastudio/core'
+import {
+  componentName,
+  componentUsesContext,
+  getComponentTarget,
+  type GeneratedFile,
+} from '@mildastudio/generate'
 import type { PackageSpec, ReleaseConfig, ReleasePlan } from './types'
+import { noticeFile } from './notice'
+import { artifactFiles, type ArtifactContext } from './artifacts'
+import { installCommand } from './install'
 
 const PEER_DEPS: Record<string, string> = { react: '>=18', 'react-dom': '>=18' }
 
@@ -44,10 +57,13 @@ export function assemble(
     throw new Error('Nothing to release: the document has no components.')
   }
 
-  const target = getTarget(config.target)
+  const target = getComponentTarget(config.target)
   const theme = target.theme(foundations, assets)
 
   const iconModule = target.icons(foundations, assets)
+  // Vendored glyphs are redistribution, so the licence travels with them (0019 + the
+  // launch backlog's licensing item). null when nothing third-party was vendored.
+  const notice = noticeFile(foundations)
   // Shared context runtime (0032 phase 4), emitted once when any component gates on a context.
   const contextModule = components.some(componentUsesContext) ? (target.context?.() ?? null) : null
   const sharedExtra = [iconModule, contextModule].filter((f): f is GeneratedFile => f !== null)
@@ -60,9 +76,31 @@ export function assemble(
     ...config.targetOptions,
     ...(sharedTypes ? { sharedTypes } : {}),
 
+    // The token set the theme is written from, so a component emits a `var()` only for a custom
+    // property that theme declares and reads anything else as a literal (proposal 0049).
+    foundations: foundations ?? defaultFoundations(),
     ...(foundations?.icons ? { icons: foundations.icons } : {}),
+    // The context groups a prop may be TYPED BY (proposal 0001): the emitter needs the group's
+    // contexts to type the prop and to set the attribute the theme sheet keys its blocks on.
+    ...(foundations?.contextGroups ? { contextGroups: foundations.contextGroups } : {}),
     ...(assets ? { assets } : {}),
     componentsById,
+  }
+
+  // The reader-facing artifacts (DESIGN.md, AGENTS.md, …) describe the package they
+  // land in, so they are written LAST, over a spec whose files are already decided:
+  // whether a theme stylesheet ships is a fact to read, not to predict.
+  const withArtifacts = (spec: PackageSpec): PackageSpec => {
+    const ctx: ArtifactContext = {
+      components,
+      foundations,
+      sharedTypes,
+      config,
+      pkg: { name: spec.name, version: spec.version, files: spec.files },
+      installCommand: installCommand(spec, config.registry),
+    }
+    const extra = artifactFiles(ctx, config.artifacts)
+    return extra.length ? { ...spec, files: [...spec.files, ...extra] } : spec
   }
 
   if (config.granularity === 'single') {
@@ -75,6 +113,7 @@ export function assemble(
       version: config.version,
       files: [
         theme,
+        ...(notice ? [notice] : []),
         barrel([...publicFiles, ...shared]),
         ...underSrc(emitted),
         ...underSrc(shared),
@@ -83,7 +122,7 @@ export function assemble(
       dependencies: {},
       peerDependencies: PEER_DEPS,
     }
-    return { packages: [pkg] }
+    return { packages: [withArtifacts(pkg)] }
   }
 
   const themePkgName = `${root}-theme`
@@ -106,7 +145,14 @@ export function assemble(
       return {
         name: `${root}-${kebab(componentName(c))}`,
         version: config.version,
-        files: [barrel([...emitted, ...shared]), ...underSrc(emitted), ...underSrc(shared)],
+        // Per package, not once: in 'multi' granularity each component ships on its own,
+        // so a consumer installing one of them must get the notice with it.
+        files: [
+          ...(notice ? [notice] : []),
+          barrel([...emitted, ...shared]),
+          ...underSrc(emitted),
+          ...underSrc(shared),
+        ],
         entry: 'src/index.ts',
 
         dependencies: { [themePkgName]: config.version },
@@ -114,5 +160,9 @@ export function assemble(
       }
     })
 
-  return { packages: [themePkg, ...componentPkgs] }
+  // Once per SET, not once per component: the description covers the whole design system,
+  // so N copies of it across N component packages would be N things to disagree. The theme
+  // package is where it goes - every component package depends on it, so a consumer who
+  // installed any one of them has it.
+  return { packages: [withArtifacts(themePkg), ...componentPkgs] }
 }

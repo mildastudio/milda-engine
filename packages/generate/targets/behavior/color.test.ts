@@ -152,7 +152,7 @@ describe('OKLCH', () => {
   })
 
   it('gamut-clamps out-of-range chroma to a valid sRGB color', () => {
-    // Absurd chroma for a mid lightness — must still resolve to a real hex.
+    // Absurd chroma for a mid lightness - must still resolve to a real hex.
     const hex = oklchToHex({ l: 0.6, c: 0.9, h: 30 })
     expect(hex).toMatch(/^#[0-9a-f]{6}$/)
     expect(oklchInGamut({ l: 0.6, c: 0.9, h: 30 })).toBe(false)

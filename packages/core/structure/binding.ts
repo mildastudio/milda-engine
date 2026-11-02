@@ -8,7 +8,12 @@ import type {
   PropCondition,
 } from './types'
 import type { PropType, PropValue, SharedType } from '../contract/types'
-import { isRenderable, isTextRenderable, isTypeCompatible, resolvePropType } from '../contract/typeCompat'
+import {
+  isRenderable,
+  isTextRenderable,
+  isTypeCompatible,
+  resolvePropType,
+} from '../contract/typeCompat'
 import { coercePredicate, evalPredicate } from './predicate'
 
 const EMPTY_STATES: ReadonlySet<never> = new Set()
@@ -98,7 +103,13 @@ export function resolveNodeContent(
   if (!content) return null
   if (content.kind === 'static') return content.text
   for (const rule of content.rules) {
-    if (evalPredicate(coercePredicate(rule.when), { props: previewProps, states: EMPTY_STATES, itemScopes }))
+    if (
+      evalPredicate(coercePredicate(rule.when), {
+        props: previewProps,
+        states: EMPTY_STATES,
+        itemScopes,
+      })
+    )
       return resolveContentValue(rule.value, previewProps, mode, itemScopes)
   }
   return resolveContentValue(content.default, previewProps, mode, itemScopes)
@@ -153,8 +164,8 @@ export function deriveItemType(repeat: NodeRepeat, component: ComponentIR): Prop
 const MAX_BIND_DEPTH = 6
 
 // The object fields of a type, seeing through `ref` (shared types) and flattening
-// `intersection` members. Arrays are intentionally NOT descended — an array element
-// is only reachable via a `repeat` item alias, never a static dotted path — and
+// `intersection` members. Arrays are intentionally NOT descended - an array element
+// is only reachable via a `repeat` item alias, never a static dotted path - and
 // `record`/`union` have no fixed field names to enumerate.
 function objectTypeFields(
   type: PropType,
@@ -201,7 +212,7 @@ export interface BindingSource {
 
 export interface CollectOpts {
   textOnly?: boolean
-  // Shared types so a prop typed as a built-in ref (IconName, Color, Date, File — all defined
+  // Shared types so a prop typed as a built-in ref (IconName, Color, Date, File - all defined
   // as `string`) resolves before the renderable/text-renderable checks. Without it a
   // `ref`-typed prop reads as non-renderable and is dropped (e.g. an IconName prop never
   // offered for an icon glyph binding).
@@ -313,7 +324,7 @@ export function normalizeDemoState(
   return out
 }
 
-// The initial prop store an example's live preview seeds from its demo state —
+// The initial prop store an example's live preview seeds from its demo state -
 // variable name → initial value.
 export function demoInitialProps(state: Record<string, unknown> | undefined): PropCondition {
   const out: PropCondition = {}

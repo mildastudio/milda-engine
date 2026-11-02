@@ -1,14 +1,13 @@
 import { archetypesByName } from '@mildastudio/milda'
-import type { StyleDecl } from '../facets/facets'
 import type { ComponentIR, ComponentNode } from '../structure/types'
 
-// `inline` = an in-flow expand/collapse region (Disclosure/Accordion) — no
+// `inline` = an in-flow expand/collapse region (Disclosure/Accordion) - no
 // positioning, no popup semantics; the trigger toggles the panel in place.
 export type SurfaceKind = 'popover' | 'menu' | 'dialog' | 'sheet' | 'inline'
 
-// What presents the surface: `activate` (click/Enter on the trigger — the default),
-// `hover` (pointer hover / keyboard focus, with tap as the touch fallback — Tooltip),
-// `context` (secondary activation on the component region — ContextMenu; realized as
+// What presents the surface: `activate` (click/Enter on the trigger - the default),
+// `hover` (pointer hover / keyboard focus, with tap as the touch fallback - Tooltip),
+// `context` (secondary activation on the component region - ContextMenu; realized as
 // right-click on web, long-press on touch).
 export type OpenTrigger = 'activate' | 'hover' | 'context'
 
@@ -17,7 +16,7 @@ export interface DisclosurePlan {
   surfaceKind: SurfaceKind
   openOn: OpenTrigger
   // A modal surface (dialog/sheet): focus moves into it while open and the page
-  // behind is inert — realized as role="dialog" + aria-modal + a focus trap.
+  // behind is inert - realized as role="dialog" + aria-modal + a focus trap.
   modal: boolean
   // The surface has no trigger and simply IS the component (Menu): always presented,
   // open/close does not apply.
@@ -147,7 +146,7 @@ function surfaceKindFrom(composes: string[]): SurfaceKind | null {
     }
   }
   // The `disclosure` composite (toggle + presentation(inline)) is an in-flow
-  // expand/collapse — Disclosure, Accordion.
+  // expand/collapse - Disclosure, Accordion.
   if (composes.includes('disclosure')) return 'inline'
   return null
 }
@@ -172,7 +171,7 @@ export function planBehavior(component: ComponentIR): BehaviorPlan {
 
   // A trigger-less popup surface (Menu, ContextMenu): the component's own region
   // hosts the presentation. ContextMenu opens on secondary activation; a plain
-  // Menu is standalone — the surface simply IS the component.
+  // Menu is standalone - the surface simply IS the component.
   const root = nodes[component.structure.rootId]
   const context = !trigger && component.archetype === 'ContextMenu'
   const standalone = !trigger && !context
@@ -213,66 +212,4 @@ export function planBehavior(component: ComponentIR): BehaviorPlan {
     optionCheckId: option ? childByLeaf(option, 'check')?.id : undefined,
     optionLabelId: option ? childByLeaf(option, 'label')?.id : undefined,
   }
-}
-
-export type RenderTarget = 'production' | 'preview'
-
-export function backdropDecls(kind: SurfaceKind, target: RenderTarget = 'production'): StyleDecl[] {
-  if (kind === 'dialog' || kind === 'sheet') {
-    return [
-      { prop: 'position', value: target === 'preview' ? 'absolute' : 'fixed' },
-      { prop: 'inset', value: '0' },
-      { prop: 'zIndex', value: '1000' },
-    ]
-  }
-  return []
-}
-
-export function anchorDecls(kind: SurfaceKind): StyleDecl[] {
-  if (kind === 'popover' || kind === 'menu') {
-    return [
-      { prop: 'position', value: 'relative' },
-      { prop: 'display', value: 'inline-block' },
-    ]
-  }
-  return []
-}
-
-export function surfacePositionDecls(
-  kind: SurfaceKind,
-  target: RenderTarget = 'production',
-): StyleDecl[] {
-  const fixedOrAbsolute = target === 'preview' ? 'absolute' : 'fixed'
-  if (kind === 'popover' || kind === 'menu') {
-    return [
-      { prop: 'position', value: 'absolute' },
-      { prop: 'top', value: 'calc(100% + 4px)' },
-      { prop: 'left', value: '0' },
-      { prop: 'minWidth', value: '100%' },
-      { prop: 'zIndex', value: '50' },
-    ]
-  }
-  if (kind === 'dialog') {
-    return [
-      { prop: 'position', value: fixedOrAbsolute },
-      { prop: 'top', value: '50%' },
-      { prop: 'left', value: '50%' },
-      { prop: 'transform', value: 'translate(-50%, -50%)' },
-      { prop: 'maxWidth', value: 'calc(100% - 32px)' },
-      { prop: 'maxHeight', value: '90%' },
-      { prop: 'overflowY', value: 'auto' },
-      { prop: 'zIndex', value: '1001' },
-    ]
-  }
-  if (kind === 'sheet') {
-    return [
-      { prop: 'position', value: fixedOrAbsolute },
-      { prop: 'top', value: '0' },
-      { prop: 'right', value: '0' },
-      { prop: 'bottom', value: '0' },
-      { prop: 'overflowY', value: 'auto' },
-      { prop: 'zIndex', value: '1001' },
-    ]
-  }
-  return []
 }

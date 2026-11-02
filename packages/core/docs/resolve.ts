@@ -3,6 +3,7 @@ import type { ComponentGroup } from '../structure/componentGroups'
 import type { EventDef, PropDef, PropType, PropValue, SharedType } from '../contract/types'
 import type { TokenType } from '../foundations/document'
 import { propTypeLabel } from '../contract/label'
+import { propConstraintSentence, requiredWhenSentence } from '../rules/sentence'
 import { collectSlots } from '../structure/slots'
 import type { DocBlock, DocProseKind, DocsFooter, DocsModel } from './document'
 
@@ -60,6 +61,8 @@ export interface ResolvedComponent {
   description?: string
   archetype: string | null
   props: ResolvedProp[]
+  // The group constraints over those props (proposal 0052 §4), as the sentences a reader sees.
+  constraints?: string[]
   events: ResolvedEvent[]
 
   api: ResolvedSlot[]
@@ -79,6 +82,8 @@ export interface ResolvedProp {
 
   typeLabel: string
   required: boolean
+  /** "Required when `loading`." when the prop is required on a condition (0052 §4). */
+  requiredWhen?: string
   description?: string
   default?: PropValue
 }
@@ -214,6 +219,9 @@ function resolveComponent(
     description: component.description,
     archetype: component.archetype,
     props: (component.contract?.props ?? []).map((p) => resolveProp(p, sharedTypes)),
+    ...(component.contract?.constraints?.length
+      ? { constraints: component.contract.constraints.map(propConstraintSentence) }
+      : {}),
     events: (component.contract?.events ?? []).map((e) => resolveEvent(e, sharedTypes)),
     api: collectSlots(component).map((s) => ({
       name: s.name,
@@ -242,6 +250,7 @@ function resolveProp(p: PropDef, sharedTypes?: SharedType[]): ResolvedProp {
     type: p.type,
     typeLabel: propTypeLabel(p.type, sharedTypes),
     required: Boolean(p.required),
+    ...(p.requiredWhen && !p.required ? { requiredWhen: requiredWhenSentence(p) } : {}),
     description: p.description,
     default: p.default,
   }

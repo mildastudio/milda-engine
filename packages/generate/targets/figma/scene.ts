@@ -1,18 +1,21 @@
 // ─── Node tree → Figma layer scene (proposal 0010 phase 2) ───────────────────
 // Pure compiler: ComponentIR + DocumentFoundations + one resolved variant combo →
 // a serializable Figma layer tree. Never imports the Figma SDK (platform-
-// independence line) — the plugin (apps/figma-plugin) is the only place that calls
+// independence line) - the plugin (apps/figma-plugin) is the only place that calls
 // figma.createFrame/createText/etc, reading this JSON as its instructions.
 
 import {
   FACETS,
   defaultContextSelections,
   findToken,
-  isRawValue,
+  couldBeLiteral,
   resolveFacet,
   resolveIcon,
   resolveNodeFacets,
   resolveNodeLayout,
+  resolveLayoutIntent,
+  layoutSlotValue,
+  unsupportedLayoutSlots,
   resolveToken,
   iconifySvgUrl,
   customToggleVariant,
@@ -20,10 +23,12 @@ import {
   normalizeContentValue,
   coercePredicate,
   evalPredicate,
+  type AxisSizeIntent,
   type ComponentIR,
   type ComponentNode,
   type DocumentFoundations,
   type FacetScale,
+  type LayoutCoverage,
   type NodeKind,
   type PropCondition,
   type StateName,
@@ -34,23 +39,52 @@ import type { VariantCombo } from './variants'
 export interface FigmaBinding {
   value?: string
   // Present when the facet resolves to a token exported as a Figma Variable in
-  // figma-variables.json (see model.ts:variableName) — the plugin should bind the
+  // figma-variables.json (see model.ts:variableName) - the plugin should bind the
   // field to that variable instead of using `value` as a literal.
   variableRef?: string
 }
 
 export interface FigmaAutoLayoutDimension {
-  mode: 'fit' | 'fill' | 'fixed'
+  mode: 'fit' | 'fill' | 'fixed' | 'weight' | 'ratio'
   value?: FigmaBinding
+  /** `weight(n)`: Figma has no proportional share, so the plugin draws it as a fill. */
+  weight?: number
+  /** `ratio(w:h)`: this axis follows the other; the plugin sizes to it and locks the ratio. */
+  ratio?: { w: number; h: number }
 }
 
+/** The IR's layout, as the plugin applies it (proposal 0056 §3.4). `layers` is a frame without
+ *  auto layout whose children sit at the origin; the clamps and the position apply to the node
+ *  as a CHILD of an auto-layout frame. */
 export interface FigmaAutoLayout {
-  direction: 'row' | 'column'
-  align?: 'start' | 'center' | 'end' | 'stretch'
-  distribute?: 'start' | 'center' | 'end' | 'between' | 'around'
+  direction: 'row' | 'column' | 'layers'
+  align?: 'start' | 'center' | 'end' | 'stretch' | 'baseline'
+  distribute?: 'start' | 'center' | 'end' | 'between' | 'around' | 'evenly'
   wrap?: boolean
   width?: FigmaAutoLayoutDimension
   height?: FigmaAutoLayoutDimension
+  minWidth?: FigmaBinding
+  maxWidth?: FigmaBinding
+  minHeight?: FigmaBinding
+  maxHeight?: FigmaBinding
+  position?: 'overlay' | 'pinned' | 'bleed'
+}
+
+/**
+ * What Figma auto layout can be made to show of the layout model, and what it cannot. The same
+ * shape as `FIGMA_COVERAGE` in the plugin: a reason ends up in the "skipped" list after a sync.
+ */
+export const FIGMA_LAYOUT_COVERAGE: LayoutCoverage = {
+  layers: null,
+  baseline: null,
+  clamp: null,
+  overlay: null,
+  evenly: 'auto layout has no space-evenly; drawn as space-between',
+  wrapReverse: 'auto layout wraps forward only; drawn as wrap',
+  weight: 'auto layout has no proportional share; a weighted child fills like its siblings',
+  ratio: 'the aspect ratio is locked from the size at sync time, not kept as a rule',
+  pinned: 'Figma has no sticky positioning; drawn where the flow puts it',
+  bleed: 'an auto layout child cannot extend past the frame padding; drawn in flow',
 }
 
 interface FigmaNodeBase {
@@ -68,7 +102,7 @@ export interface FigmaFrameNode extends FigmaNodeBase {
 export interface FigmaTextNode extends FigmaNodeBase {
   type: 'TEXT'
   characters: string
-  // Set when characters is a prop-bound placeholder ("$label") — the name of the
+  // Set when characters is a prop-bound placeholder ("$label") - the name of the
   // TEXT component property (see properties.ts) this layer's characters should bind to.
   textPropertyRef?: string
   style: Record<string, FigmaBinding>
@@ -84,7 +118,7 @@ export interface FigmaVectorNode extends FigmaNodeBase {
 
 export interface FigmaInstanceNode extends FigmaNodeBase {
   type: 'INSTANCE'
-  // The referenced component's IR id — resolve against the export document's
+  // The referenced component's IR id - resolve against the export document's
   // `componentNames` map (componentId → exported Figma component name) since the
   // referenced component may not have been walked yet.
   componentRef: string
@@ -96,12 +130,12 @@ export interface FigmaPlaceholderNode extends FigmaNodeBase {
 }
 
 // A sealed boolean control (checkbox/switch) has no exposed anatomy of its own
-// to walk — its box/glyph/track/thumb are lowered, hidden realization detail
+// to walk - its box/glyph/track/thumb are lowered, hidden realization detail
 // (packages/core/behavior/lowerControl.ts), invisible to every other target's
 // generic node-tree walk too. Rather than leave it an empty frame (the only
 // other option a "no Figma mapping" node has), the plugin draws this directly
 // from the SAME default geometry/state constants the CSS target already uses,
-// so a re-styled/re-themed toggle after "switch context" stays consistent —
+// so a re-styled/re-themed toggle after "switch context" stays consistent -
 // see model.ts's variableRef convention, carried through in `color`.
 export interface FigmaControlSchematicNode extends FigmaNodeBase {
   type: 'CONTROL_SCHEMATIC'
@@ -129,7 +163,7 @@ interface SceneContext {
   states: ReadonlySet<StateName>
   contextSelections: Record<string, string>
   assets: Record<string, { url?: string }>
-  // Figma is a visual medium — a bound text/icon with no per-variant override
+  // Figma is a visual medium - a bound text/icon with no per-variant override
   // must show something a designer can actually look at, never a raw "$propName"
   // placeholder (that's only appropriate for the DSL-text view). Keyed by prop
   // name, holding each prop's authored default value as a display string.
@@ -147,16 +181,25 @@ const CONTAINER_KINDS = new Set<NodeKind>([
 ])
 
 function resolveFacetBinding(scale: FacetScale, id: string, ctx: SceneContext): FigmaBinding {
-  if (isRawValue(id)) return { value: id }
+  // Token first, literal second (proposal 0049). This one already looked up a token before
+  // falling back to `resolveFacet`; what changed is that the SYNTACTIC check no longer short-
+  // circuits ahead of the lookup, so a bare number reaches its literal instead of nothing, and a
+  // token whose id happens to look like a value still binds as a Variable.
   const token = findToken(ctx.foundations, id, scale)
   if (token) {
     return {
       variableRef: variableName(token),
-      value: resolveToken(id, ctx.foundations, { contextSelections: ctx.contextSelections }, token.type),
+      value: resolveToken(
+        id,
+        ctx.foundations,
+        { contextSelections: ctx.contextSelections },
+        token.type,
+      ),
     }
   }
   const literal = resolveFacet(scale, id)
-  return literal ? { value: literal } : {}
+  if (literal) return { value: literal }
+  return couldBeLiteral(id) ? { value: id } : {}
 }
 
 function buildStyle(node: ComponentNode, ctx: SceneContext): Record<string, FigmaBinding> {
@@ -166,34 +209,60 @@ function buildStyle(node: ComponentNode, ctx: SceneContext): Record<string, Figm
     if (!id) continue
     const def = FACETS[key]
     if (!def) continue
-    style[key] = resolveFacetBinding(def.scale, id, ctx)
+    // A keyword facet (no scale: `slant`) has no token to bind to a Figma Variable - its
+    // value is the keyword itself, carried through as a plain value.
+    style[key] = def.scale ? resolveFacetBinding(def.scale, id, ctx) : { value: id }
   }
   return style
 }
 
-function dimension(v: string | undefined, ctx: SceneContext): FigmaAutoLayoutDimension | undefined {
-  if (!v) return undefined
-  if (v === 'fit' || v === 'fill') return { mode: v }
-  return { mode: 'fixed', value: resolveFacetBinding('size', v, ctx) }
+function dimension(
+  axis: AxisSizeIntent | undefined,
+  ctx: SceneContext,
+): FigmaAutoLayoutDimension | undefined {
+  if (!axis) return undefined
+  switch (axis.mode) {
+    case 'fit':
+    case 'fill':
+      return { mode: axis.mode }
+    case 'weight':
+      return { mode: 'weight', weight: axis.weight }
+    case 'ratio':
+      return { mode: 'ratio', ratio: { w: axis.w, h: axis.h } }
+    case 'fixed':
+      return { mode: 'fixed', value: resolveFacetBinding('size', axis.value, ctx) }
+  }
 }
 
-function buildAutoLayout(node: ComponentNode, ctx: SceneContext): FigmaAutoLayout | undefined {
-  const layout = resolveNodeLayout(node, ctx.propCondition, ctx.states)
-  if (!layout.direction && !layout.align && !layout.distribute && !layout.width && !layout.height) {
-    return undefined
+function buildAutoLayout(
+  node: ComponentNode,
+  ctx: SceneContext,
+  skipped: string[],
+): FigmaAutoLayout | undefined {
+  // The record is read once, in core, the same way the web tier and the kernel read it.
+  const intent = resolveLayoutIntent(resolveNodeLayout(node, ctx.propCondition, ctx.states))
+  if (Object.keys(intent).length === 0) return undefined
+  for (const { slot, reason } of unsupportedLayoutSlots(intent, FIGMA_LAYOUT_COVERAGE)) {
+    skipped.push(`Layout "${layoutSlotValue(intent, slot)}" on "${node.name}": ${reason}.`)
   }
+  const clamp = (v: string | undefined) => (v ? resolveFacetBinding('size', v, ctx) : undefined)
   return {
-    direction: layout.direction === 'column' ? 'column' : 'row',
-    align: layout.align as FigmaAutoLayout['align'],
-    distribute: layout.distribute as FigmaAutoLayout['distribute'],
-    wrap: layout.wrap === 'wrap',
-    width: dimension(layout.width, ctx),
-    height: dimension(layout.height, ctx),
+    direction: intent.direction ?? 'row',
+    align: intent.align,
+    distribute: intent.distribute,
+    wrap: intent.wrap === 'wrap' || intent.wrap === 'wrap-reverse',
+    width: dimension(intent.width, ctx),
+    height: dimension(intent.height, ctx),
+    minWidth: clamp(intent.widthMin),
+    maxWidth: clamp(intent.widthMax),
+    minHeight: clamp(intent.heightMin),
+    maxHeight: clamp(intent.heightMax),
+    position: intent.position?.kind,
   }
 }
 
 // A content rule's predicate (0032) evaluated against a Figma variant's prop combo.
-// Variants carry no interaction states, so states resolve as absent — a state/context
+// Variants carry no interaction states, so states resolve as absent - a state/context
 // leaf then simply doesn't match, the safe default for this best-effort visual target.
 function ruleWhenHolds(when: unknown, propCondition: PropCondition): boolean {
   return evalPredicate(coercePredicate(when), { props: propCondition, states: EMPTY_FIGMA_STATES })
@@ -201,7 +270,7 @@ function ruleWhenHolds(when: unknown, propCondition: PropCondition): boolean {
 
 const EMPTY_FIGMA_STATES: ReadonlySet<never> = new Set()
 
-// Shared by text nodes (characters) and icon nodes (glyph name) — both store their
+// Shared by text nodes (characters) and icon nodes (glyph name) - both store their
 // content the same way: static text or a prop-bound default with optional per-
 // prop-condition overrides.
 function resolveContentForVariant(
@@ -220,9 +289,9 @@ function resolveContentForVariant(
 }
 
 // A prop with no authored default still needs *something* legible in a visual
-// medium — "iconName" reads better as "Icon Name" than as a bare identifier.
+// medium - "iconName" reads better as "Icon Name" than as a bare identifier.
 // A dotted name ("item.label") is a per-iteration repeat binding, not a contract
-// prop (see seed.ts's `${itemAlias}.label`) — only its last segment is meaningful
+// prop (see seed.ts's `${itemAlias}.label`) - only its last segment is meaningful
 // to a reader, the alias prefix would just read as noise ("Item.label").
 function humanize(propName: string): string {
   const tail = propName.includes('.') ? propName.slice(propName.lastIndexOf('.') + 1) : propName
@@ -293,7 +362,7 @@ function buildFrameNode(
     id: node.id,
     name: node.name,
     type: 'FRAME',
-    autoLayout: buildAutoLayout(node, ctx),
+    autoLayout: buildAutoLayout(node, ctx, skipped),
     style: buildStyle(node, ctx),
     children,
   }
@@ -308,24 +377,35 @@ function buildNode(
   if (node.kind === 'text') return buildTextNode(node, ctx)
   if (node.kind === 'icon') return buildIconNode(node, ctx, skipped)
   if (node.kind === 'instance' && node.instance) {
-    return { id: node.id, name: node.name, type: 'INSTANCE', componentRef: node.instance.componentId }
+    return {
+      id: node.id,
+      name: node.name,
+      type: 'INSTANCE',
+      componentRef: node.instance.componentId,
+    }
   }
   if (node.kind === 'input' || node.kind === 'output') {
     // A "Make custom" toggle lowers to a real `container` node (real indicator/
-    // glyph/track/thumb children) — that already flows through CONTAINER_KINDS
+    // glyph/track/thumb children) - that already flows through CONTAINER_KINDS
     // below like any other tree. Only the SEALED default (still kind 'input',
     // no exposed anatomy) needs this synthesized stand-in.
     const toggle = customToggleVariant(node)
     if (toggle) return buildSealedToggleNode(node, ir, ctx, toggle, skipped)
-    return { id: node.id, name: node.name, type: 'FRAME', style: buildStyle(node, ctx), children: [] }
+    return {
+      id: node.id,
+      name: node.name,
+      type: 'FRAME',
+      style: buildStyle(node, ctx),
+      children: [],
+    }
   }
   if (CONTAINER_KINDS.has(node.kind)) return buildFrameNode(node, ir, ctx, skipped)
 
   const reason =
     node.kind === 'foreign'
-      ? `Foreign code node "${node.name}" has no Figma equivalent — arbitrary code cannot be drawn.`
+      ? `Foreign code node "${node.name}" has no Figma equivalent - arbitrary code cannot be drawn.`
       : node.kind === 'content'
-        ? `Media node "${node.name}" was not exported — image/video content export is not yet supported.`
+        ? `Media node "${node.name}" was not exported - image/video content export is not yet supported.`
         : `Node "${node.name}" (kind "${node.kind}") has no Figma mapping.`
   skipped.push(reason)
   return { id: node.id, name: node.name, type: 'PLACEHOLDER', reason }
@@ -338,12 +418,14 @@ function buildSealedToggleNode(
   variant: 'checkbox' | 'switch',
   skipped: string[],
 ): FigmaControlSchematicNode {
-  // A sealed control exposes no facets of its own by design — buildStyle still
+  // A sealed control exposes no facets of its own by design - buildStyle still
   // resolves whatever the archetype DID set directly on this node (rare, but
   // some seeds do), falling back to a neutral default so the shape is at least
   // visible instead of an invisible near-white outline.
   const style = buildStyle(node, ctx)
-  const color: FigmaBinding = style['border.color'] ?? style.fill ?? style.ink ?? { value: '#1a1a1a' }
+  const color: FigmaBinding = style['border.color'] ??
+    style.fill ??
+    style.ink ?? { value: '#1a1a1a' }
 
   if (variant === 'checkbox' && checkboxGlyphChild(node, ir.structure.nodes)) {
     skipped.push(
@@ -383,6 +465,11 @@ export function buildComponentScene(
   const rootNode = ir.structure.nodes[ir.structure.rootId]
   const root = rootNode
     ? buildNode(rootNode, ir, ctx, skipped)
-    : ({ id: ir.structure.rootId, name: ir.name, type: 'PLACEHOLDER', reason: 'Missing root node.' } as const)
+    : ({
+        id: ir.structure.rootId,
+        name: ir.name,
+        type: 'PLACEHOLDER',
+        reason: 'Missing root node.',
+      } as const)
   return { root, skipped }
 }

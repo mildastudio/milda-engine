@@ -14,7 +14,7 @@ its own idiom.
   so they cannot diverge (proposal 0029). Calendar core lands here.
 - **web/react** (`targets/web/react/*`) - emits React components (`emit`) and the theme
   wiring (`theme`), including real interaction behavior and native semantics.
-- **web/_shared** (`targets/web/_shared/*`) - web conventions (ARIA, keyboard, `data-*`)
+- **web/\_shared** (`targets/web/_shared/*`) - web conventions (ARIA, keyboard, `data-*`)
   reused by every web framework view.
 - **css** (`targets/css/*`) - emits stylesheets from resolved facets and tokens.
 - **figma** (`targets/figma/*`) - emits Figma Variables and DTCG tokens from the
@@ -23,7 +23,7 @@ its own idiom.
 ## Design invariants
 
 - **Neutral in, idiomatic out.** A target receives the platform-neutral IR and is
-  the *only* place allowed to introduce platform assumptions (tags, pseudo-classes,
+  the _only_ place allowed to introduce platform assumptions (tags, pseudo-classes,
   framework APIs).
 - **Generated output is a leaf, never a source.** Output is meant to be
   regenerated; the seams for customization live in the IR, so consumers never

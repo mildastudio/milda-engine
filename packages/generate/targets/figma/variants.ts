@@ -1,13 +1,20 @@
 // ─── Variant/state matrix (proposal 0010 phase 2) ────────────────────────────
 // The IR expresses variants as enum/boolean contract props and states as per-node
-// StateRule[] conditions — neither is an orthogonal axis grid on its own. A Figma
+// StateRule[] conditions - neither is an orthogonal axis grid on its own. A Figma
 // Component Set needs one flat list of named members, so this merges both sources
 // into a bounded, deduped combo list: cartesian product of prop axes × the DISTINCT
 // state-name combinations actually referenced anywhere in the tree (not the full
-// ALL_STATE_NAMES product, which would explode combinatorially for no reason — most
+// ALL_STATE_NAMES product, which would explode combinatorially for no reason - most
 // of those combinations never appear in any rule).
 
-import type { ComponentIR, ComponentNode, PropCondition, PropDef, PropValue, StateName } from '@mildastudio/core'
+import type {
+  ComponentIR,
+  ComponentNode,
+  PropCondition,
+  PropDef,
+  PropValue,
+  StateName,
+} from '@mildastudio/core'
 
 export interface VariantCombo {
   name: string
@@ -84,7 +91,7 @@ export function buildVariantMatrix(
       skipped: [
         `Variant matrix has ${total} combination(s) (${propCombos.length} prop combo(s) × ` +
           `${stateCombos.length} state combo(s)), exceeding the cap of ${maxCombos}. Only the ` +
-          `default variant was exported — narrow the contract's enum/boolean props or raise ` +
+          `default variant was exported - narrow the contract's enum/boolean props or raise ` +
           `maxVariantsPerComponent.`,
       ],
     }

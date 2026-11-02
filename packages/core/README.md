@@ -1,7 +1,7 @@
 # @mildastudio/core
 
 The component **intermediate representation (IR)** and its semantics - the layer
-every Milda tool operates on between the [`@mildastudio/milda`](../../milda) language and the
+every Milda tool operates on between the [`@mildastudio/milda`](../milda) language and the
 generators.
 
 Where the `@mildastudio/milda` package defines the canonical language and prelude, `@mildastudio/core`
@@ -35,7 +35,7 @@ contracts, styling, and behavior, plus the pure operations over them.
 
 ## Status
 
-`0.x` - unstable until `1.0`. Depends on [`@mildastudio/milda`](../../milda).
+`0.x` - unstable until `1.0`. Depends on [`@mildastudio/milda`](../milda).
 
 ## License
 

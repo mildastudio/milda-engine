@@ -3,7 +3,7 @@ import type { PropValue } from '../contract/types'
 import { resolveBindingValue, type ItemScope } from './binding'
 
 // ─── Unified predicate conditions (proposal 0032) ────────────────────────────
-// One structured condition model behind styling, content, and presence — replacing the
+// One structured condition model behind styling, content, and presence - replacing the
 // flat, equality-AND `PropCondition`. A predicate is a tree of boolean groups (`all`/
 // `any`/`not`) over comparison leaves (`cmp`) that test a referenced value (a prop, a UI
 // state, or a foundations context) against an operator. `PropCondition` becomes the
@@ -15,7 +15,7 @@ export type PredicateRef =
   // A UI state (boolean). Only prop-reachable states are OFFERED by the editor / emittable
   // by the generator, but the IR itself is source-agnostic.
   | { kind: 'state'; state: StateName }
-  // A foundations context group id (e.g. `ColorScheme`) — its active context id is the value.
+  // A foundations context group id (e.g. `ColorScheme`) - its active context id is the value.
   | { kind: 'context'; group: string }
   // An ancestor node's UI state ("when {nodeId} is {state}", proposal 0025). Styling-only:
   // realized by the CSS target as a descendant selector; has no runtime JS boolean, so the
@@ -34,8 +34,8 @@ export type CompareOp =
   | 'unset' // falsy (no `value`)
 
 export type Predicate =
-  | { kind: 'all'; items: Predicate[] } // AND — empty ⇒ true (the "always" identity)
-  | { kind: 'any'; items: Predicate[] } // OR — empty ⇒ false
+  | { kind: 'all'; items: Predicate[] } // AND - empty ⇒ true (the "always" identity)
+  | { kind: 'any'; items: Predicate[] } // OR - empty ⇒ false
   | { kind: 'not'; item: Predicate }
   | { kind: 'cmp'; ref: PredicateRef; op: CompareOp; value?: PropValue }
 
@@ -46,7 +46,7 @@ export interface PredicateContext {
   // only matches `unset`), the safe default in surfaces that don't track context.
   contexts?: Record<string, string>
   itemScopes?: ItemScope[]
-  // Live UI states of an ancestor node (by id) — backs `ancestor` leaves. Absent in
+  // Live UI states of an ancestor node (by id) - backs `ancestor` leaves. Absent in
   // contexts that don't track it (thumbnails, static resolution); an ancestor leaf then
   // reads as not-held, the safe default.
   ancestorStates?: (nodeId: string) => ReadonlySet<StateName> | undefined
@@ -87,7 +87,7 @@ function compare(left: unknown, op: CompareOp, value: PropValue | undefined): bo
 }
 
 // Evaluate a predicate. Absent predicate ⇒ true (unconditional). An empty `all` is true;
-// an empty `any` is false — so a freshly-added, still-empty group reads as "no constraint".
+// an empty `any` is false - so a freshly-added, still-empty group reads as "no constraint".
 export function evalPredicate(p: Predicate | undefined, ctx: PredicateContext): boolean {
   if (!p) return true
   switch (p.kind) {
@@ -110,7 +110,7 @@ export function isUnconditional(p: Predicate | undefined): boolean {
 
 // Upgrade the legacy equality-AND shape (a `PropCondition` map + optional state list) to a
 // predicate: an `all` of `eq` prop compares and `set` state compares. Returns undefined
-// when there is no constraint, so callers can store `undefined` (= always). Lossless — the
+// when there is no constraint, so callers can store `undefined` (= always). Lossless - the
 // evaluator on the result matches the old `whenHolds`/`ruleMatches` semantics exactly.
 export function predicateFromLegacy(
   when?: PropCondition,
@@ -125,14 +125,18 @@ export function predicateFromLegacy(
     items.push({ kind: 'cmp', ref: { kind: 'state', state }, op: 'set' })
   }
   for (const a of ancestorStates ?? []) {
-    items.push({ kind: 'cmp', ref: { kind: 'ancestor', nodeId: a.nodeId, state: a.state }, op: 'set' })
+    items.push({
+      kind: 'cmp',
+      ref: { kind: 'ancestor', nodeId: a.nodeId, state: a.state },
+      op: 'set',
+    })
   }
   return items.length ? { kind: 'all', items } : undefined
 }
 
 // The CSS-representable decomposition of a predicate (proposal 0032 §4.2), or null when the
 // predicate can't be a static selector. A predicate is representable iff it's an `all` (or a
-// single leaf / empty) of EQUALITY prop compares and `set` state / ancestor leaves — exactly
+// single leaf / empty) of EQUALITY prop compares and `set` state / ancestor leaves - exactly
 // the old StateRule shape (`props` + `states` + `ancestorStates`). Anything richer (or, not,
 // operators other than eq/set, prop `set`/context) returns null, so the CSS target can fall
 // back to a JS-computed `data-cond` boolean instead of a selector.
@@ -149,7 +153,8 @@ export function representablePredicate(
     const { ref, op } = leaf
     if (ref.kind === 'prop' && op === 'eq' && leaf.value !== undefined) props[ref.path] = leaf.value
     else if (ref.kind === 'state' && op === 'set') states.push(ref.state)
-    else if (ref.kind === 'ancestor' && op === 'set') ancestorStates.push({ nodeId: ref.nodeId, state: ref.state })
+    else if (ref.kind === 'ancestor' && op === 'set')
+      ancestorStates.push({ nodeId: ref.nodeId, state: ref.state })
     else return null
   }
   return { props, states, ancestorStates }

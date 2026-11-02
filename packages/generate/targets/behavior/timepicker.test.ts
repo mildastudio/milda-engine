@@ -32,7 +32,11 @@ describe('buildTimeList', () => {
   })
 
   it('disables slots outside [min, max]', () => {
-    const cells = buildTimeList({ step: 60, min: { hour: 9, minute: 0 }, max: { hour: 17, minute: 0 } })
+    const cells = buildTimeList({
+      step: 60,
+      min: { hour: 9, minute: 0 },
+      max: { hour: 17, minute: 0 },
+    })
     const at = (h: number) => cells.find((c) => c.value.hour === h && c.value.minute === 0)!
     expect(at(8).states.disabled).toBe(true)
     expect(at(9).states.disabled).toBe(false)

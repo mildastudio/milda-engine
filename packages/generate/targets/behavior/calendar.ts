@@ -100,12 +100,15 @@ export function addDays(d: YMD, n: number): YMD {
 }
 
 /** Shift a year/month by `delta` months (1-12 output month). */
-export function addMonths(m: { year: number; month: number }, delta: number): {
+export function addMonths(
+  m: { year: number; month: number },
+  delta: number,
+): {
   year: number
   month: number
 } {
   const zeroBased = m.year * 12 + (m.month - 1) + delta
-  return { year: Math.floor(zeroBased / 12), month: ((zeroBased % 12) + 12) % 12 + 1 }
+  return { year: Math.floor(zeroBased / 12), month: (((zeroBased % 12) + 12) % 12) + 1 }
 }
 
 /** Chronological comparison: negative if `a < b`, 0 if equal, positive if `a > b`. */
@@ -134,8 +137,11 @@ export function buildCalendar(input: CalendarInput): CalendarModel {
   const { year, month } = input.displayedMonth
   const disabledWeekdays = new Set(input.disabledWeekdays ?? [])
 
-  const single = mode === 'single' ? (input.selection as SingleSelection) ?? null : null
-  const range = mode === 'range' ? effectiveRange((input.selection as RangeSelection) ?? null, input.hoverPreview) : null
+  const single = mode === 'single' ? ((input.selection as SingleSelection) ?? null) : null
+  const range =
+    mode === 'range'
+      ? effectiveRange((input.selection as RangeSelection) ?? null, input.hoverPreview)
+      : null
 
   // Leading blanks: how many days of the previous month fill the first row.
   const firstDow = dayOfWeek({ year, month, day: 1 })
@@ -170,13 +176,11 @@ export function buildCalendar(input: CalendarInput): CalendarModel {
       disabledWeekdays.has(dayOfWeek(date)) ||
       (input.isDateDisabled?.(date) ?? false)
 
-    const rangeStart = !!range && (range.b != null ? sameDay(date, range.a) : sameDay(date, range.a))
+    const rangeStart =
+      !!range && (range.b != null ? sameDay(date, range.a) : sameDay(date, range.a))
     const rangeEnd = !!range && range.b != null && sameDay(date, range.b)
     const inRange =
-      !!range &&
-      range.b != null &&
-      compareYMD(date, range.a) > 0 &&
-      compareYMD(date, range.b) < 0
+      !!range && range.b != null && compareYMD(date, range.a) > 0 && compareYMD(date, range.b) < 0
 
     const selected = mode === 'range' ? rangeStart || rangeEnd : sameDay(date, single)
 

@@ -1,6 +1,6 @@
 {
   "name": "@mildastudio/core",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -9,25 +9,31 @@
   },
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.mjs",
-      "require": "./dist/index.js"
+      "import": {
+        "types": "./dist/index.d.mts",
+        "default": "./dist/index.mjs"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
     }
   },
-  "main": "./dist/index.js",
+  "main": "./dist/index.cjs",
   "module": "./dist/index.mjs",
-  "types": "./dist/index.d.ts",
+  "types": "./dist/index.d.cts",
   "files": [
     "dist"
   ],
   "scripts": {
-    "build": "tsup index.ts --format esm,cjs --dts --clean"
+    "build": "tsdown index.ts --format esm,cjs --dts --clean"
   },
   "dependencies": {
-    "@mildastudio/milda": "^0.1.0"
+    "@mildastudio/milda": "^0.2.0"
   },
   "devDependencies": {
-    "tsup": "^8.5.1",
-    "typescript": "^6.0.3"
+    "@types/node": "^26.1.0",
+    "tsdown": "^0.22.14",
+    "typescript": "^7.0.2"
   }
 }

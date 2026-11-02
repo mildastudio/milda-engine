@@ -1,20 +1,10 @@
 import type { TokenType } from '../foundations/document'
 
 export type DocProseKind =
-  | 'heading'
-  | 'subheading'
-  | 'paragraph'
-  | 'list'
-  | 'quote'
-  | 'callout'
-  | 'code'
+  'heading' | 'subheading' | 'paragraph' | 'list' | 'quote' | 'callout' | 'code'
 
 export type DocComponentPartKind =
-  | 'componentProps'
-  | 'componentEvents'
-  | 'componentComposition'
-  | 'componentProp'
-  | 'componentEvent'
+  'componentProps' | 'componentEvents' | 'componentComposition' | 'componentProp' | 'componentEvent'
 
 export type DocBlockKind =
   | DocProseKind

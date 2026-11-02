@@ -107,7 +107,12 @@ export type MessageManifest = Record<string, MessageManifestEntry>
 export function manifestFromCatalog(catalog: MessageCatalog): MessageManifest {
   const out: MessageManifest = {}
   for (const m of catalog.messages) {
-    out[m.id] = { default: m.default, params: m.params, description: m.description, source: m.source }
+    out[m.id] = {
+      default: m.default,
+      params: m.params,
+      description: m.description,
+      source: m.source,
+    }
   }
   return out
 }
@@ -170,5 +175,10 @@ export interface LocalizationSettings {
 /** The zero-config default: single baked locale, no framework dep - matches today's
  * behavior. `byo-prop` is still emitted as the universal escape hatch. */
 export function defaultLocalizationSettings(): LocalizationSettings {
-  return { formatting: { defaultLocale: 'en-US' }, strategy: 'baked', locales: [], rtl: 'auto-from-locale' }
+  return {
+    formatting: { defaultLocale: 'en-US' },
+    strategy: 'baked',
+    locales: [],
+    rtl: 'auto-from-locale',
+  }
 }

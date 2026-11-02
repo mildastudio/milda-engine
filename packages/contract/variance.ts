@@ -32,6 +32,10 @@ export function canonicalType(t: PropType): string {
       return `component(${(t.componentIds ?? []).slice().sort().join('|') || '*'})`
     case 'ref':
       return `ref(${t.ref})`
+    // Typed by a context group (proposal 0001): the group IS the type - moving a prop from
+    // `Variant` to `Size` changes every value it admits, so it must not read as no change.
+    case 'context':
+      return `context(${t.group})`
     case 'typeParam':
       return `typeParam(${t.name})`
     default:

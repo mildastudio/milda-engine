@@ -1,10 +1,17 @@
 import type { FreeBehaviorKind } from '../behavior/free'
-import type { AncestorStateCondition, ComponentNode, NodeKind, PropCondition, StateName, StateRule } from './types'
+import type {
+  AncestorStateCondition,
+  ComponentNode,
+  NodeKind,
+  PropCondition,
+  StateName,
+  StateRule,
+} from './types'
 import { type ItemScope } from './binding'
 import { evalPredicate, representablePredicate } from './predicate'
 
 // A StateRule whose rich `when` (0032) can't become a static CSS selector (OR/NOT/operators/
-// context) — the CSS target realizes it as a `[data-cond-<id>]` attribute the React generator
+// context) - the CSS target realizes it as a `[data-cond-<id>]` attribute the React generator
 // sets from the computed predicate boolean. Representable `when`s (and legacy props/states
 // rules) stay pure selectors, so existing output is unchanged.
 export function ruleNeedsDataCond(rule: StateRule): boolean {
@@ -84,7 +91,7 @@ export function isFocusable(node: ComponentNode, nodes: Record<string, Component
   return false
 }
 
-// Looks up the live UI states of an ancestor node (by id) — supplied by the editor's
+// Looks up the live UI states of an ancestor node (by id) - supplied by the editor's
 // render so a rule's `ancestorStates` can be evaluated against the specific ancestor.
 // Absent in contexts that don't track it (thumbnails, static resolution): anchored
 // conditions then simply don't match, which is the safe default.
@@ -98,7 +105,13 @@ export function ruleMatches(
   contexts?: Record<string, string>,
 ): boolean {
   // A rich `when` predicate (0032) supersedes the representable fields when present.
-  if (rule.when) return evalPredicate(rule.when, { props: activeProps, states: activeStates, ancestorStates, contexts })
+  if (rule.when)
+    return evalPredicate(rule.when, {
+      props: activeProps,
+      states: activeStates,
+      ancestorStates,
+      contexts,
+    })
   for (const [k, v] of Object.entries(rule.props)) {
     if (activeProps[k] !== v) return false
   }
@@ -122,7 +135,12 @@ export function nodeIsPresent(
   itemScopes: ItemScope[] = [],
   contexts?: Record<string, string>,
 ): boolean {
-  return evalPredicate(node.presence, { props: activeProps, states: activeStates, itemScopes, contexts })
+  return evalPredicate(node.presence, {
+    props: activeProps,
+    states: activeStates,
+    itemScopes,
+    contexts,
+  })
 }
 
 export function resolveNodeFacets(
@@ -134,7 +152,8 @@ export function resolveNodeFacets(
 ): Record<string, string> {
   let facets = { ...(node.facets ?? {}) }
   for (const rule of node.states ?? []) {
-    if (ruleMatches(rule, activeProps, activeStates, ancestorStates, contexts)) facets = { ...facets, ...(rule.facets ?? {}) }
+    if (ruleMatches(rule, activeProps, activeStates, ancestorStates, contexts))
+      facets = { ...facets, ...(rule.facets ?? {}) }
   }
   return facets
 }
@@ -148,14 +167,15 @@ export function resolveNodeLayout(
 ): Record<string, string> {
   let layout = { ...(node.layout ?? {}) }
   for (const rule of node.states ?? []) {
-    if (ruleMatches(rule, activeProps, activeStates, ancestorStates, contexts)) layout = { ...layout, ...(rule.layout ?? {}) }
+    if (ruleMatches(rule, activeProps, activeStates, ancestorStates, contexts))
+      layout = { ...layout, ...(rule.layout ?? {}) }
   }
   return layout
 }
 
 // Canonicalize a tree's rules: a self state that an ANCESTOR controls (see `ancestorControlsState`)
 // is moved into that rule's `ancestorStates`, keyed on the controlling ancestor. So a ToggleButton
-// icon authored with a self `onSelected` becomes "when the root is selected" in the IR — the form the
+// icon authored with a self `onSelected` becomes "when the root is selected" in the IR - the form the
 // Style tab shows under the ancestor group and the generator emits as `.root[data-selected] .icon`.
 // Idempotent (an already-anchored state has left `states`, so nothing re-moves); self-owned,
 // per-item, and uncontrolled states are untouched. Returns a new nodes map; inputs are not mutated.

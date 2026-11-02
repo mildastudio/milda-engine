@@ -1,10 +1,18 @@
 import { describe, expect, it } from 'vitest'
-import { nodeIsPresent, type ComponentIR, type ComponentNode, type Predicate } from '@mildastudio/core'
+import { readEmitted } from './testkit'
+import {
+  nodeIsPresent,
+  type ComponentIR,
+  type ComponentNode,
+  type Predicate,
+} from '@mildastudio/core'
 import { toComponentSource } from './emit'
 
 // A minimal node with only the fields the emitter/evaluator need; the rest are defaulted
 // to the inert shape a container/text node carries.
-function node(partial: Partial<ComponentNode> & Pick<ComponentNode, 'id' | 'kind' | 'parentId'>): ComponentNode {
+function node(
+  partial: Partial<ComponentNode> & Pick<ComponentNode, 'id' | 'kind' | 'parentId'>,
+): ComponentNode {
   return {
     name: partial.id,
     tag: 'auto',
@@ -31,7 +39,12 @@ function component(nodes: ComponentNode[], rootId: string): ComponentIR {
   }
 }
 
-const propEq = (path: string, value: unknown): Predicate => ({ kind: 'cmp', ref: { kind: 'prop', path }, op: 'eq', value: value as never })
+const propEq = (path: string, value: unknown): Predicate => ({
+  kind: 'cmp',
+  ref: { kind: 'prop', path },
+  op: 'eq',
+  value: value as never,
+})
 
 describe('nodeIsPresent (predicate)', () => {
   const base = node({ id: 'n', kind: 'text', parentId: 'root' })
@@ -55,8 +68,21 @@ describe('nodeIsPresent (predicate)', () => {
 
 describe('React generator predicate emission', () => {
   const withPresence = (presence: Predicate) => {
-    const root = node({ id: 'root', kind: 'container', tag: 'div', parentId: null, childrenIds: ['label'] })
-    const label = node({ id: 'label', kind: 'text', tag: 'span', parentId: 'root', content: { kind: 'static', text: 'Hi' }, presence })
+    const root = node({
+      id: 'root',
+      kind: 'container',
+      tag: 'div',
+      parentId: null,
+      childrenIds: ['label'],
+    })
+    const label = node({
+      id: 'label',
+      kind: 'text',
+      tag: 'span',
+      parentId: 'root',
+      content: { kind: 'static', text: 'Hi' },
+      presence,
+    })
     return toComponentSource(component([root, label], 'root'))
   }
 
@@ -64,17 +90,21 @@ describe('React generator predicate emission', () => {
     const pred: Predicate = {
       kind: 'all',
       items: [
-        { kind: 'any', items: [propEq('variant', 'primary'), { kind: 'cmp', ref: { kind: 'prop', path: 'size' }, op: 'gte', value: 3 }] },
+        {
+          kind: 'any',
+          items: [
+            propEq('variant', 'primary'),
+            { kind: 'cmp', ref: { kind: 'prop', path: 'size' }, op: 'gte', value: 3 },
+          ],
+        },
         { kind: 'not', item: { kind: 'cmp', ref: { kind: 'prop', path: 'disabled' }, op: 'set' } },
       ],
     }
-    const tsx = withPresence(pred)
-    expect(tsx).toContain('variant === "primary"')
-    expect(tsx).toContain('size >= 3')
-    expect(tsx).toContain('||')
-    expect(tsx).toContain('!(')
-    // The whole thing wraps the element as a JSX guard.
-    expect(tsx).toMatch(/&&\s*\(/)
+    // The WHOLE guard, in one assertion. The old form checked for `||` and `!(`
+    // separately, which four unrelated expressions could also satisfy between them.
+    expect(readEmitted({ tsx: withPresence(pred) }).tsx.guardOf('span')).toBe(
+      '(((variant === "primary") || (size >= 3)) && (!(disabled)))',
+    )
   })
 
   it('emits dotted-path (object field) and contains operators', () => {
@@ -85,13 +115,19 @@ describe('React generator predicate emission', () => {
         { kind: 'cmp', ref: { kind: 'prop', path: 'label' }, op: 'contains', value: '@' },
       ],
     }
-    const tsx = withPresence(pred)
-    expect(tsx).toContain('user.role === "admin"')
-    expect(tsx).toContain('.includes("@")')
+    expect(readEmitted({ tsx: withPresence(pred) }).tsx.guardOf('span')).toBe(
+      '((user.role === "admin") && ((label)?.includes("@")))',
+    )
   })
 
   it('guards a repeated node inside the map as a bare expression (no JSX braces)', () => {
-    const root = node({ id: 'root', kind: 'container', tag: 'ul', parentId: null, childrenIds: ['row'] })
+    const root = node({
+      id: 'root',
+      kind: 'container',
+      tag: 'ul',
+      parentId: null,
+      childrenIds: ['row'],
+    })
     const row = node({
       id: 'row',
       kind: 'item',
@@ -105,16 +141,37 @@ describe('React generator predicate emission', () => {
     ir.contract!.props.push({
       id: 'p4',
       name: 'items',
-      type: { kind: 'array', item: { kind: 'object', fields: [{ id: 'f', name: 'active', type: { kind: 'boolean' }, required: false }] } },
+      type: {
+        kind: 'array',
+        item: {
+          kind: 'object',
+          fields: [{ id: 'f', name: 'active', type: { kind: 'boolean' }, required: false }],
+        },
+      },
     })
     const tsx = toComponentSource(ir)
-    expect(tsx).toContain('item.active === true')
+    // Inside the map the guard is the callback's bare body, not a `{…}` container - that
+    // is what the second assertion is about, and finding the guard on the <li> at all is
+    // what says the repeat kept its predicate.
+    expect(readEmitted({ tsx }).tsx.guardOf('li')).toBe('(item.active === true)')
     expect(tsx).not.toMatch(/=>\s*\(\s*\{/)
   })
 
   it('does not wrap an unconditional child', () => {
-    const root = node({ id: 'root', kind: 'container', tag: 'div', parentId: null, childrenIds: ['label'] })
-    const label = node({ id: 'label', kind: 'text', tag: 'span', parentId: 'root', content: { kind: 'static', text: 'Hi' } })
+    const root = node({
+      id: 'root',
+      kind: 'container',
+      tag: 'div',
+      parentId: null,
+      childrenIds: ['label'],
+    })
+    const label = node({
+      id: 'label',
+      kind: 'text',
+      tag: 'span',
+      parentId: 'root',
+      content: { kind: 'static', text: 'Hi' },
+    })
     const tsx = toComponentSource(component([root, label], 'root'))
     expect(tsx).not.toMatch(/&&\s*\(/)
   })

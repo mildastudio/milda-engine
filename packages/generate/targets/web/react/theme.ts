@@ -1,17 +1,21 @@
 import {
   colorVarName,
+  contextDataAttr,
+  contextValue,
+  easingVarName,
+  gradientVarName,
+  scaleVarName,
+  textStyleVarName,
+} from '../_shared'
+import {
   defaultContextSelections,
   defaultFoundations,
-  easingVarName,
   fontFamilyStack,
   googleFontsCssUrl,
-  gradientVarName,
   isLengthType,
   lengthToCss,
   resolveTextStyle,
   resolveToken,
-  scaleVarName,
-  textStyleVarName,
   type DocumentFoundations,
   type FontFamily,
   type ScaleName,
@@ -137,14 +141,6 @@ function diffVars(base: VarDecl[], variant: VarDecl[]): VarDecl[] {
   return variant.filter((v) => baseByName.get(v.name) !== v.value)
 }
 
-function dataAttr(groupId: string): string {
-  const kebab = groupId
-    .replace(/([a-z0-9])([A-Z])/g, '$1-$2')
-    .replace(/[\s_]+/g, '-')
-    .toLowerCase()
-  return `data-${kebab}`
-}
-
 export function themeCss(
   foundations: DocumentFoundations = defaultFoundations(),
   assets?: Record<string, { url?: string }>,
@@ -161,7 +157,7 @@ export function themeCss(
 
   for (const group of foundations.contextGroups) {
     const defaultCtxId = defaultSel[group.id]
-    const attr = dataAttr(group.id)
+    const attr = contextDataAttr(group.name)
 
     const varying = new Set<string>()
     let hasMedia = false
@@ -172,18 +168,25 @@ export function themeCss(
       if (!diffs.length) continue
       diffs.forEach((d) => varying.add(d.name))
 
-      attrBlocks.push(renderBlock(`[${attr}="${ctx.id}"]`, diffs))
-      if (ctx.id === 'light' || ctx.id === 'dark') {
+      attrBlocks.push(renderBlock(`[${attr}="${contextValue(ctx.name)}"]`, diffs))
+      if (contextValue(ctx.name) === 'light' || contextValue(ctx.name) === 'dark') {
         hasMedia = true
         const body = diffs.map((v) => `    ${v.name}: ${v.value};`).join('\n')
-        mediaBlocks.push(`@media (prefers-color-scheme: ${ctx.id}) {\n  :root {\n${body}\n  }\n}`)
+        mediaBlocks.push(
+          `@media (prefers-color-scheme: ${contextValue(ctx.name)}) {\n  :root {\n${body}\n  }\n}`,
+        )
       }
     }
 
     if (hasMedia && defaultCtxId) {
       const baseSubset = baseVars.filter((v) => varying.has(v.name))
       if (baseSubset.length)
-        attrBlocks.unshift(renderBlock(`[${attr}="${defaultCtxId}"]`, baseSubset))
+        attrBlocks.unshift(
+          renderBlock(
+            `[${attr}="${contextValue(group.contexts.find((c) => c.id === defaultCtxId)?.name ?? defaultCtxId)}"]`,
+            baseSubset,
+          ),
+        )
     }
   }
 
