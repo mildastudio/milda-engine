@@ -44,6 +44,7 @@ import {
   SWITCH_THUMB_PART,
 } from '../behavior/lowerControl'
 import { controlVariantStyle, applyGroupVariant, seedStructure } from './seed'
+import { INSET_KEYS, isInsetKey } from '../facets/facets'
 
 export function defaultTagForKind(kind: NodeKind): NodeTag {
   switch (kind) {
@@ -795,6 +796,49 @@ export function updateStateRule(
 ): ComponentStructure {
   return setNodeStates(structure, nodeId, (rules) =>
     mapRule(rules, ruleId, (r) => ({ ...r, ...patch })),
+  )
+}
+
+// ─── Insets as one set (proposal 0057 §4.7) ───
+// An inset is up to seven keys of different reach (the shorthand, two axes, four edges), and
+// within one map the most specific stated key wins on its edge. So going from "one value per
+// edge" back to "one value" has to REMOVE the edge keys, or they keep winning over the new
+// shorthand - several keys changing for one decision. These replace a node's (or a rule's) whole
+// inset set at once, which is what keeps that decision one mutation, one undo step and one
+// changelog line. Keys outside the inset set are ignored, and an empty value is absent.
+export function withInsets(
+  facets: Record<string, string> | undefined,
+  insets: Record<string, string>,
+): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const [k, v] of Object.entries(facets ?? {})) if (!isInsetKey(k)) out[k] = v
+  for (const k of INSET_KEYS) {
+    const v = insets[k]
+    if (v) out[k] = v
+  }
+  return out
+}
+
+export function setInsets(
+  structure: ComponentStructure,
+  nodeId: string,
+  insets: Record<string, string>,
+): ComponentStructure {
+  const node = structure.nodes[nodeId]
+  if (!node) return structure
+  const next = clone(structure)
+  next.nodes[nodeId] = { ...node, facets: withInsets(node.facets, insets) }
+  return next
+}
+
+export function setStateRuleInsets(
+  structure: ComponentStructure,
+  nodeId: string,
+  ruleId: string,
+  insets: Record<string, string>,
+): ComponentStructure {
+  return setNodeStates(structure, nodeId, (rules) =>
+    mapRule(rules, ruleId, (r) => ({ ...r, facets: withInsets(r.facets, insets) })),
   )
 }
 

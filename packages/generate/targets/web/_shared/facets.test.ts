@@ -33,32 +33,41 @@ describe('facet CSS lowering', () => {
     expect(facetDecls({ inset: '4px' }, raw)).toEqual([{ prop: 'padding', value: '4px' }])
   })
 
-  it('splits into longhands when an axis disagrees with the shorthand', () => {
-    // Not `padding` plus two overrides, which is what this emitted before and only worked
-    // because a longhand happened to follow the shorthand.
+  // Proposal 0057: logical properties, so a start edge stays the start edge right to left. Not
+  // `padding` plus overrides, which this emitted once and which only worked because a longhand
+  // happened to follow the shorthand.
+  it('uses the axis shorthands when each axis is symmetric', () => {
     expect(facetDecls({ inset: '4px', insetX: '8px' }, raw)).toEqual([
-      { prop: 'paddingTop', value: '4px' },
-      { prop: 'paddingRight', value: '8px' },
-      { prop: 'paddingBottom', value: '4px' },
-      { prop: 'paddingLeft', value: '8px' },
+      { prop: 'paddingBlock', value: '4px' },
+      { prop: 'paddingInline', value: '8px' },
     ])
   })
 
   it('emits only the axes it was given', () => {
-    expect(facetDecls({ insetY: '2px' }, raw)).toEqual([
-      { prop: 'paddingTop', value: '2px' },
-      { prop: 'paddingBottom', value: '2px' },
-    ])
+    expect(facetDecls({ insetY: '2px' }, raw)).toEqual([{ prop: 'paddingBlock', value: '2px' }])
   })
 
   // A zero is a value: `inset: 4px, insetX: 0px` is a real request for no horizontal padding,
   // and `||` anywhere in the chain would silently give it 4px instead.
   it('honours a stated zero on one axis', () => {
     expect(facetDecls({ inset: '4px', insetX: '0px' }, raw)).toEqual([
-      { prop: 'paddingTop', value: '4px' },
-      { prop: 'paddingRight', value: '0px' },
-      { prop: 'paddingBottom', value: '4px' },
-      { prop: 'paddingLeft', value: '0px' },
+      { prop: 'paddingBlock', value: '4px' },
+      { prop: 'paddingInline', value: '0px' },
+    ])
+  })
+
+  it('splits into the four logical longhands when one edge differs', () => {
+    expect(facetDecls({ inset: '4px', 'inset.inline-start': '2px' }, raw)).toEqual([
+      { prop: 'paddingBlockStart', value: '4px' },
+      { prop: 'paddingBlockEnd', value: '4px' },
+      { prop: 'paddingInlineStart', value: '2px' },
+      { prop: 'paddingInlineEnd', value: '4px' },
+    ])
+  })
+
+  it('emits a lone edge as its own longhand and nothing else', () => {
+    expect(facetDecls({ 'inset.block-end': '6px' }, raw)).toEqual([
+      { prop: 'paddingBlockEnd', value: '6px' },
     ])
   })
 

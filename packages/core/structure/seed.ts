@@ -1,4 +1,4 @@
-import { archetypesByName, atomsByName, compositesByName } from '@mildastudio/milda'
+import { archetypesByName, atomsByName, compositesByName, loweredAnatomy } from '@mildastudio/milda'
 import type { AnatomyPart, PartRole } from '@mildastudio/milda'
 import type { ComponentContract, EventDef, PropDef, PropType, PropValue } from '../contract/types'
 import { BUILTIN_COLOR_ID, BUILTIN_DATE_ID } from '../contract/builtins'
@@ -225,7 +225,9 @@ interface LoweredValueControl {
 const LOWERED_VALUE_CONTROL: Record<string, LoweredValueControl> = {
   BooleanInput: {
     atom: 'toggle',
-    collapses: ['control', 'indicator'],
+    // The language package owns which parts collapse, because editor tooling has to know that a
+    // BooleanInput without a `control` part is not missing one.
+    collapses: [...loweredAnatomy('BooleanInput')],
     prop: { name: 'checked', type: { kind: 'boolean' }, default: false },
   },
 }

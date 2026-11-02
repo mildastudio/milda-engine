@@ -18,6 +18,7 @@ import {
   RING_WIDTH,
   canAcceptChildren,
   couldBeLiteral,
+  insetAxesAreSymmetric,
   insetsAreUniform,
   resolveFacet,
   resolveFacetIntent,
@@ -52,15 +53,16 @@ export const facetCssVar: FacetResolver = (scale, id) => {
   return cssVarRef(scale === 'color' ? colorVarName(id) : scaleVarName(scale, id))
 }
 
-// The neutral inset slots, in the order CSS wants them, paired with their longhand. Reached
-// only when the four edges disagree - a uniform inset stays the `padding` shorthand it always
-// was, because that is what the baseline `FACET_DEFAULTS` override and everything downstream
-// expects to see.
+// The neutral inset edges, paired with their logical longhand (proposal 0057): logical, so a
+// design system's start edge stays the start edge in a right-to-left locale. Reached only when
+// the axes are not symmetric - a uniform inset stays the `padding` shorthand it always was,
+// because that is what the baseline `FACET_DEFAULTS` override and everything downstream expects
+// to see, and a symmetric one is `padding-block` / `padding-inline`.
 const EDGE_PROPS = [
-  ['top', 'paddingTop'],
-  ['right', 'paddingRight'],
-  ['bottom', 'paddingBottom'],
-  ['left', 'paddingLeft'],
+  ['blockStart', 'paddingBlockStart'],
+  ['blockEnd', 'paddingBlockEnd'],
+  ['inlineStart', 'paddingInlineStart'],
+  ['inlineEnd', 'paddingInlineEnd'],
 ] as const
 
 /**
@@ -121,7 +123,10 @@ export function facetDecls(
 
   const { insets } = intent
   if (insetsAreUniform(insets)) {
-    push('padding', v(insets.top))
+    push('padding', v(insets.blockStart))
+  } else if (insetAxesAreSymmetric(insets)) {
+    push('paddingBlock', v(insets.blockStart))
+    push('paddingInline', v(insets.inlineStart))
   } else {
     for (const [edge, prop] of EDGE_PROPS) push(prop, v(insets[edge]))
   }
@@ -154,14 +159,12 @@ export const FACET_DEFAULTS: Record<string, StyleDecl[]> = {
   ink: [{ prop: 'color', value: 'inherit' }],
   corner: [{ prop: 'borderRadius', value: '0' }],
   inset: [{ prop: 'padding', value: '0' }],
-  insetX: [
-    { prop: 'paddingLeft', value: '0' },
-    { prop: 'paddingRight', value: '0' },
-  ],
-  insetY: [
-    { prop: 'paddingTop', value: '0' },
-    { prop: 'paddingBottom', value: '0' },
-  ],
+  insetX: [{ prop: 'paddingInline', value: '0' }],
+  insetY: [{ prop: 'paddingBlock', value: '0' }],
+  'inset.block-start': [{ prop: 'paddingBlockStart', value: '0' }],
+  'inset.block-end': [{ prop: 'paddingBlockEnd', value: '0' }],
+  'inset.inline-start': [{ prop: 'paddingInlineStart', value: '0' }],
+  'inset.inline-end': [{ prop: 'paddingInlineEnd', value: '0' }],
   gap: [{ prop: 'gap', value: '0' }],
 
   'border.width': [
@@ -189,10 +192,12 @@ export function facetDefaultValue(key: string): string | undefined {
 }
 
 const COVERED_BY_SHORTHAND: Record<string, string> = {
-  paddingLeft: 'padding',
-  paddingRight: 'padding',
-  paddingTop: 'padding',
-  paddingBottom: 'padding',
+  paddingBlock: 'padding',
+  paddingInline: 'padding',
+  paddingBlockStart: 'padding',
+  paddingBlockEnd: 'padding',
+  paddingInlineStart: 'padding',
+  paddingInlineEnd: 'padding',
 }
 
 export function facetBaselineDecls(kind: NodeKind): StyleDecl[] {

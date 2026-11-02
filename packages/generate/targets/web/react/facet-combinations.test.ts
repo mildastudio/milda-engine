@@ -25,10 +25,11 @@ import { readCss } from './testkit'
 // shorthand the uniform case uses. Proposal 0048 §6 states the rule; nothing was checking that
 // the web tier still obeyed it, because no fixture anywhere had both keys on one node.
 //
-// It also cannot BE a corpus fixture: the `.milda` surface spells insets as `inset ‹all›` or
-// `inset ‹block› ‹inline›`, so a mixed inset is unauthorable in text and only ever arrives from
-// the editor. That is exactly the case the paired-fixture pattern is for - assert it against
-// the lowering directly rather than growing a corpus that cannot express it.
+// It was not a corpus fixture because the `.milda` surface could not spell it until proposal
+// 0057 gave it `inset.inline` / `inset.block` and the four `inset.<edge>` forms. The corpus is
+// also the round trip's contract, so the shapes stay pinned here, against the lowering directly.
+// Since 0057 the lowering is LOGICAL: `padding-block` / `padding-inline` when each axis is
+// symmetric, the four `padding-*-start/end` longhands when it is not.
 //
 // Values are deliberately unresolvable token ids, so `v()` falls through to the literal gate
 // (proposal 0049) and each declaration shows the AUTHORED id. A test about which slot a facet
@@ -42,50 +43,44 @@ const decls = (facets: Record<string, string>) =>
 const props = (facets: Record<string, string>) =>
   facetDecls(facets, () => undefined).map((d) => d.prop)
 
-describe('inset: the axis beats the shorthand, per edge', () => {
+describe('inset: the more specific key beats the shorthand, per edge', () => {
   it('a lone inset stays the shorthand', () => {
     expect(decls({ inset: '8px' })).toEqual({ padding: '8px' })
   })
 
-  it('inset + insetX splits into longhands: X horizontally, the shorthand vertically', () => {
+  it('inset + insetX: the axis inline, the shorthand on the block axis', () => {
     expect(decls({ inset: '8px', insetX: '16px' })).toEqual({
-      paddingTop: '8px',
-      paddingRight: '16px',
-      paddingBottom: '8px',
-      paddingLeft: '16px',
+      paddingBlock: '8px',
+      paddingInline: '16px',
     })
   })
 
   it('inset + insetY splits the other way', () => {
     expect(decls({ inset: '8px', insetY: '2px' })).toEqual({
-      paddingTop: '2px',
-      paddingRight: '8px',
-      paddingBottom: '2px',
-      paddingLeft: '8px',
+      paddingBlock: '2px',
+      paddingInline: '8px',
     })
   })
 
-  it('never emits the shorthand next to the longhands it would overwrite', () => {
+  it('never emits the shorthand next to the declarations it would overwrite', () => {
     expect(props({ inset: '8px', insetX: '16px' })).not.toContain('padding')
+    expect(props({ inset: '8px', 'inset.inline-end': '2px' })).not.toContain('padding')
   })
 
-  // A lone axis leaves the other two edges UNSET rather than zeroed: the node's baseline
-  // already says what an unstated edge is, and pushing `0` here would beat a `padding` a
-  // caller layered on top.
-  it('a lone insetX touches only the horizontal edges', () => {
-    expect(decls({ insetX: '16px' })).toEqual({ paddingRight: '16px', paddingLeft: '16px' })
+  // An unstated edge stays unstated: the baseline (`padding: 0` on the container) already says
+  // what an unstated edge is, and pushing `0` here would beat a `padding` a state rule sets.
+  it('a lone insetX touches only the inline axis', () => {
+    expect(decls({ insetX: '16px' })).toEqual({ paddingInline: '16px' })
   })
 
   it('two axes carrying the same value collapse back to the shorthand', () => {
     expect(decls({ insetX: '4px', insetY: '4px' })).toEqual({ padding: '4px' })
   })
 
-  it('two axes carrying different values are four longhands', () => {
+  it('two axes carrying different values are the two axis shorthands', () => {
     expect(decls({ insetX: '16px', insetY: '8px' })).toEqual({
-      paddingTop: '8px',
-      paddingRight: '16px',
-      paddingBottom: '8px',
-      paddingLeft: '16px',
+      paddingBlock: '8px',
+      paddingInline: '16px',
     })
   })
 
@@ -93,11 +88,23 @@ describe('inset: the axis beats the shorthand, per edge', () => {
   // and the one an `??` chain gets wrong.
   it('a stated zero overrides the shorthand rather than reading as absent', () => {
     expect(decls({ inset: '8px', insetY: '0px' })).toEqual({
-      paddingTop: '0px',
-      paddingRight: '8px',
-      paddingBottom: '0px',
-      paddingLeft: '8px',
+      paddingBlock: '0px',
+      paddingInline: '8px',
     })
+  })
+
+  // Proposal 0057: the leading-icon button, tighter on the start edge.
+  it('one edge beats its axis and the shorthand, and the rest stay as stated', () => {
+    expect(decls({ inset: '8px', insetX: '16px', 'inset.inline-start': '12px' })).toEqual({
+      paddingBlockStart: '8px',
+      paddingBlockEnd: '8px',
+      paddingInlineStart: '12px',
+      paddingInlineEnd: '16px',
+    })
+  })
+
+  it('a lone edge is its own longhand', () => {
+    expect(decls({ 'inset.inline-start': '24px' })).toEqual({ paddingInlineStart: '24px' })
   })
 })
 
@@ -297,18 +304,16 @@ describe('a mixed inset in the emitted stylesheet', () => {
   const selector = css.selectors[0]!
   const rule = [...(css.rules.get(selector)?.keys() ?? [])]
 
-  it('emits the four longhands', () => {
-    expect(css.decl(selector, 'padding-top')).toBe('var(--ds-spacing-space-2)')
-    expect(css.decl(selector, 'padding-bottom')).toBe('var(--ds-spacing-space-2)')
-    expect(css.decl(selector, 'padding-left')).toBe('var(--ds-spacing-space-4)')
-    expect(css.decl(selector, 'padding-right')).toBe('var(--ds-spacing-space-4)')
+  it('emits the two axis shorthands', () => {
+    expect(css.decl(selector, 'padding-block')).toBe('var(--ds-spacing-space-2)')
+    expect(css.decl(selector, 'padding-inline')).toBe('var(--ds-spacing-space-4)')
   })
 
-  // The container baseline opens with `padding: 0`. If the shorthand landed after the
-  // longhands the node would ship with no padding at all - a silent, total loss of the
-  // authored value, and the exact shape a `toContain('padding-left')` assertion cannot see.
-  it('the baseline shorthand comes before the longhands it must not overwrite', () => {
-    expect(rule.indexOf('padding')).toBeLessThan(rule.indexOf('padding-left'))
+  // The container baseline opens with `padding: 0`. If the shorthand landed after the axis
+  // declarations the node would ship with no padding at all - a silent, total loss of the
+  // authored value, and the exact shape a `toContain('padding-inline')` assertion cannot see.
+  it('the baseline shorthand comes before the declarations it must not overwrite', () => {
+    expect(rule.indexOf('padding')).toBeLessThan(rule.indexOf('padding-inline'))
   })
 })
 

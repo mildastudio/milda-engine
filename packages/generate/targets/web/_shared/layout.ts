@@ -20,6 +20,7 @@ import {
   resolveLayoutIntent,
   resolveScaleToken,
   mainAxisOf,
+  type EdgeIntent,
   type FacetResolver,
   type LayoutCoverage,
   type LayoutIntent,
@@ -96,28 +97,29 @@ export interface LayoutLoweringOptions {
   facet?: FacetResolver
 }
 
-// The CSS logical margin a bleed sets per edge, and the side of the parent's box whose inset it
-// cancels. Logical on the margin side so the generated CSS reads right in RTL; physical on the
-// inset side because that is how core's facet intent names the four edges (and the IR's insets
-// are axis-symmetric, so the left value IS the inline-start value either way).
-const BLEED_EDGES: Record<LogicalEdge, { prop: string; side: PhysicalEdge }[]> = {
-  'block-start': [{ prop: 'marginBlockStart', side: 'top' }],
-  'block-end': [{ prop: 'marginBlockEnd', side: 'bottom' }],
-  'inline-start': [{ prop: 'marginInlineStart', side: 'left' }],
-  'inline-end': [{ prop: 'marginInlineEnd', side: 'right' }],
+// The CSS logical margin a bleed sets per edge, and the edge of the parent's box whose inset it
+// cancels. Logical on both sides, so the generated CSS reads right in RTL and a parent whose
+// inset differs per edge (proposal 0057) is cancelled edge by edge.
+type InsetSide = keyof EdgeIntent
+
+const BLEED_EDGES: Record<LogicalEdge, { prop: string; side: InsetSide }[]> = {
+  'block-start': [{ prop: 'marginBlockStart', side: 'blockStart' }],
+  'block-end': [{ prop: 'marginBlockEnd', side: 'blockEnd' }],
+  'inline-start': [{ prop: 'marginInlineStart', side: 'inlineStart' }],
+  'inline-end': [{ prop: 'marginInlineEnd', side: 'inlineEnd' }],
   block: [
-    { prop: 'marginBlockStart', side: 'top' },
-    { prop: 'marginBlockEnd', side: 'bottom' },
+    { prop: 'marginBlockStart', side: 'blockStart' },
+    { prop: 'marginBlockEnd', side: 'blockEnd' },
   ],
   inline: [
-    { prop: 'marginInlineStart', side: 'left' },
-    { prop: 'marginInlineEnd', side: 'right' },
+    { prop: 'marginInlineStart', side: 'inlineStart' },
+    { prop: 'marginInlineEnd', side: 'inlineEnd' },
   ],
   all: [
-    { prop: 'marginBlockStart', side: 'top' },
-    { prop: 'marginInlineEnd', side: 'right' },
-    { prop: 'marginBlockEnd', side: 'bottom' },
-    { prop: 'marginInlineStart', side: 'left' },
+    { prop: 'marginBlockStart', side: 'blockStart' },
+    { prop: 'marginInlineEnd', side: 'inlineEnd' },
+    { prop: 'marginBlockEnd', side: 'blockEnd' },
+    { prop: 'marginInlineStart', side: 'inlineStart' },
   ],
 }
 

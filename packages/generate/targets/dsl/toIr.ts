@@ -62,9 +62,11 @@ import type {
 import {
   BUILTIN_SHARED_TYPES,
   GOOGLE_FONTS,
+  INSET_SURFACE_KEYS,
   ALL_STATE_NAMES,
   ROLE_TO_KIND,
   SYSTEM_STACKS,
+  isLockedPart,
   seedStructure,
   contextSlotsToValue,
   defaultBehavior,
@@ -78,11 +80,11 @@ import {
   MEDIA_TYPES,
   NODE_KINDS,
   PART_CONFIGS,
-  archetypesByName,
+  anatomyIndex,
   camelField,
-  type AnatomyPart,
+  findDeclaredPart,
   type ConfigFieldSpec,
-  type PartRole,
+  type InsetEdge,
 } from '@mildastudio/milda'
 import type {
   Asset,
@@ -663,16 +665,12 @@ function facetValueToStr(v: FacetValue): string | null {
 }
 
 function applyInset(inset: InsetValue, out: Record<string, string>): void {
-  if ('all' in inset && inset.all) out.inset = normId(inset.all)
-  else if ('block' in inset || 'inline' in inset) {
-    const i = inset as { block?: string; inline?: string }
-    if (i.block) out.insetY = normId(i.block)
-    if (i.inline) out.insetX = normId(i.inline)
-  } else {
-    const i = inset as { top?: string; left?: string }
-    if (i.top) out.insetY = normId(i.top)
-    if (i.left) out.insetX = normId(i.left)
+  if ('all' in inset) {
+    if (inset.all) out.inset = normId(inset.all)
+    return
   }
+  if (inset.block) out.insetY = normId(inset.block)
+  if (inset.inline) out.insetX = normId(inset.inline)
 }
 
 function facetMapToIr(fm: FacetMap | undefined, issues: string[]): Record<string, string> {
@@ -682,6 +680,14 @@ function facetMapToIr(fm: FacetMap | undefined, issues: string[]): Record<string
     if (!val) continue
     if (name === 'inset' && 'inset' in val) {
       applyInset(val.inset, out)
+      continue
+    }
+    // One axis or one edge (proposal 0057): `inset.inline` is stored as `insetX`, an edge under
+    // its own dotted key. Core's table is the one place the two spellings meet.
+    if (name.startsWith('inset.')) {
+      const key = INSET_SURFACE_KEYS[name.slice('inset.'.length) as InsetEdge]
+      const s = facetValueToStr(val)
+      if (key && s != null) out[key] = s
       continue
     }
     // border (all sides) + per-side borders → split the multi-valued facet into the
@@ -1197,37 +1203,14 @@ export interface ComponentToIrResult {
 // generated React, an empty rectangle on the canvas, and an anatomy that did not match the
 // archetype it claimed - which is what "the archetype was not recognised" looks like from the
 // outside. The archetype WAS carried; it just was not applied.
-// Keyed by the part's own NAME, not by its path. The anatomy's paths are relative to the
-// archetype's own top level, and a file is free to nest those parts deeper: `Menu` declares
-// `item`, and the Radix DropdownMenu writes it as `content.item`. Matching on the path would
-// therefore call an authored part unknown and then seed a second copy of it one level up, which
-// is exactly what a first attempt did (DropdownMenu came back with 10 nodes instead of 9).
-// A name repeated at two depths keeps the shallower entry, which is the one a bare reference means.
-interface AnatomyPartRef {
-  name: string
-  parentName: string | null
-  role: PartRole
-  optional: boolean
-}
-
-function archetypeAnatomy(archetype: string | undefined | null): Map<string, AnatomyPartRef> {
-  const out = new Map<string, AnatomyPartRef>()
-  const parts = archetype ? archetypesByName[archetype]?.anatomy : undefined
-  if (!parts) return out
-  const walk = (part: AnatomyPart, parentName: string | null) => {
-    if (!out.has(part.name)) {
-      out.set(part.name, {
-        name: part.name,
-        parentName,
-        role: part.role,
-        optional: part.optional === true,
-      })
-    }
-    for (const child of part.children ?? []) walk(child, part.name)
-  }
-  for (const part of parts) walk(part, null)
-  return out
-}
+// The index itself is the language package's (`anatomyIndex`), because editor tooling asks the
+// same question - which parts does this archetype require - and must get this reader's answer.
+// It is keyed by the part's NAME, not its path: a file is free to nest an archetype's part
+// deeper than the anatomy does (the Radix DropdownMenu writes `item` as `content.item`), and
+// matching on the path once seeded a second copy of it one level up.
+//
+// Since 0055 the reader also leaves that question to the rule rather than to the file: the file
+// no longer says which parts are `locked`, and `isLockedPart` answers it from the archetype.
 
 // What a `gate ‹part› active when ‹expr›` says as a node condition. The expression is an atom
 // OUTPUT (`Async.loading`, `S.selected`) - the composition algebra's own vocabulary, which the
@@ -1284,8 +1267,8 @@ export function componentToIr(c: AstComponent): ComponentToIrResult {
   // What the ARCHETYPE says this component's parts are. A file names only the parts it has
   // something to say about - `archetype Button` plus `part root` is a complete, legal Radix
   // Button - so the anatomy is where the rest of the answer lives: which parts exist, what
-  // each one IS, and which of them is the content slot. See `archetypeAnatomy`.
-  const anatomy = archetypeAnatomy(c.archetype)
+  // each one IS, and which of them is the content slot. See `anatomyIndex`.
+  const anatomy = anatomyIndex(c.archetype)
   // Part paths by their own NAME. A part is addressed by path in the file, but referred to by
   // name from outside the anatomy (a `gate` names `spinner`, not `root.spinner`), and the seed
   // pass below adds to it - so both readings resolve against one map.
@@ -1361,7 +1344,8 @@ export function componentToIr(c: AstComponent): ComponentToIrResult {
       // origin of every part in a Card or a Table on its way through the format.
       origin:
         part.origin ?? (isRoot ? 'root' : anatomy.size === 0 || known ? 'archetype' : 'author'),
-      locked: part.locked ?? false,
+      // Settled once the tree is whole (below): the archetype answers it, not the file.
+      locked: false,
       parentId: null,
       childrenIds: [],
       ...(Object.keys(facets).length ? { facets } : {}),
@@ -1589,6 +1573,11 @@ export function componentToIr(c: AstComponent): ComponentToIrResult {
       const key = `${parentPath}\0${node.kind}`
       if (!standIns.has(key)) standIns.set(key, node.id)
     }
+    // Every part path the tree has so far: the file's, then each one this pass seeds, so a seeded
+    // part's own children attach to it. Without that, `option` was seeded and `option.label` was
+    // not - and the NEXT import, seeing `option` in the file, seeded the label after all. One pass
+    // has to reach a fixed point or every export grows the tree.
+    const knownPaths = new Set(entries.map(([path]) => path))
     const walkRef = (refId: string, parentPath: string) => {
       const ref = reference.nodes[refId]
       if (!ref) return
@@ -1597,7 +1586,8 @@ export function componentToIr(c: AstComponent): ComponentToIrResult {
       // is nothing to seed it as, and the file is the authority on how it lowers its own control.
       if (!ref.part) return
       const leaf = leafOf(ref)
-      const declared = partPathByName.get(leaf)
+      const repeated = anatomy.get(leaf)?.repeated ?? false
+      const declared = findDeclaredPart(leaf, parentPath, rootName, knownPaths, repeated)
       if (!declared) {
         const standIn = standIns.get(`${parentPath}\0${ref.kind}`)
         if (standIn) {
@@ -1633,11 +1623,10 @@ export function componentToIr(c: AstComponent): ComponentToIrResult {
           parent.childrenIds.push(id)
           settledKinds.add(id)
           seededIds.add(id)
-          // A seeded part counts as declared for the rest of this pass, so its own children
-          // attach to it. Without this, `option` was seeded and `option.label` was not - and the
-          // NEXT import, seeing `option` in the file, seeded the label after all. One pass has
-          // to reach a fixed point or every export grows the tree.
-          partPathByName.set(leaf, path)
+          knownPaths.add(path)
+          // Found by a bare name elsewhere in this reader (a gate's machine) - but never at the
+          // cost of the part the file itself named that way.
+          if (!partPathByName.has(leaf)) partPathByName.set(leaf, path)
         }
       }
       for (const child of ref.childrenIds) walkRef(child, path)
@@ -1736,6 +1725,11 @@ export function componentToIr(c: AstComponent): ComponentToIrResult {
   if (displayName) delete meta.name
 
   const structure: ComponentStructure = { rootId, nodes }
+  // What the file used to say per part and no longer does (0055): the parts the archetype
+  // requires are the ones the editor will not let go of.
+  for (const id of Object.keys(nodes)) {
+    nodes[id] = { ...nodes[id], locked: isLockedPart(c.archetype, structure, id) }
+  }
   const component: ImportedComponent = {
     id: cid,
     name: displayName ?? c.name,

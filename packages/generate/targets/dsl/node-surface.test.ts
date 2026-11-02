@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest'
-import { parseMildaDocument } from '@mildastudio/milda'
+import { MILDA_SURFACE_VERSION, parseMildaDocument } from '@mildastudio/milda'
 import { documentToDsl } from './emit'
 import { documentToIr } from './toIr'
-import { hasDslLine } from './testkit'
+import { dslLines, hasDslLine } from './testkit'
 
 // ─── What a part IS, in the surface syntax (proposal 0041) ────────────────────
 // Until 2026-07-27 a `part { … }` block could only say how a node was PAINTED. Everything
@@ -265,8 +265,10 @@ describe('the part surface', () => {
     expect(byPath('root.label')?.tag).toBe('auto')
   })
 
-  it('carries provenance: origin and locked', () => {
+  it('carries provenance, and takes the lock from the archetype rather than the file', () => {
     expect(byPath('root')?.origin).toBe('root')
+    // The fixture is a 0.1 file and says `locked` on its root; since 0.9 the word is read and
+    // dropped, and the root is locked because it is the root (0055).
     expect(byPath('root')?.locked).toBe(true)
     expect(byPath('root.label')?.locked).toBe(false)
   })
@@ -549,5 +551,170 @@ describe('the round trip', () => {
       return counts
     }
     expect(fields(second.ir)).toEqual(fields(first.ir))
+  })
+})
+
+// ─── What a part is, said where it is named (proposal 0055 §3.2-§3.3) ─────────
+// `part Button: container {` and `part Button { kind container }` are two spellings of one
+// meaning. The reader lowers both to the same AST field, so everything below the parser - the
+// IR, the editor, every target - cannot tell which one a file used. The printer writes only the
+// header; the statement form keeps parsing for good, because every 0.3-0.8 file is written in it.
+//
+// The same step took `locked` out of the language: which parts may not be removed is what the
+// archetype requires, so the reader derives it, the printer never writes it, and a file that
+// still says it is read exactly as one that does not.
+
+// One component around the given parts, read the way an import reads it.
+function component(parts: string, archetype = 'Button') {
+  const parsed = parseMildaDocument(`component Box {\n  archetype ${archetype}\n${parts}\n}\n`)
+  const ir = documentToIr(parsed.document)
+  const box = ir.components.find((c) => c.name === 'Box')
+  const nodes = Object.values(box?.structure?.nodes ?? {})
+  return {
+    issues: parsed.issues.map((i) => `${i.severity} ${i.code}`),
+    irIssues: ir.issues,
+    components: ir.components,
+    node: (name: string) => nodes.find((n) => n.name === name),
+  }
+}
+
+describe('the part header (0055)', () => {
+  const statements = component(`
+  part Box {
+    kind container
+    layout { stack row }
+  }
+  part label {
+    kind text
+    content "Go"
+  }
+  part spinner {
+    kind icon
+    origin author
+  }`)
+  const header = component(`
+  part Box: container {
+    layout { stack row }
+  }
+  part label: text {
+    content "Go"
+  }
+  part spinner: icon {
+    origin author
+  }`)
+
+  it('lowers both spellings to an identical IR', () => {
+    expect(statements.issues).toEqual([])
+    expect(header.issues).toEqual([])
+    expect(header.components).toEqual(statements.components)
+  })
+
+  it('prints the header and no kind or locked statement', () => {
+    const text = documentToDsl({ components: statements.components })
+    expect(hasDslLine(text, 'part Box: container {')).toBe(true)
+    expect(hasDslLine(text, 'part label: text {')).toBe(true)
+    expect(hasDslLine(text, 'part spinner: icon {')).toBe(true)
+    // Provenance stays in the body: the header says what a part IS, not where it came from.
+    expect(hasDslLine(text, 'origin author')).toBe(true)
+    expect(dslLines(text).filter((l) => /^kind\b/.test(l) || /\blocked\b/.test(l))).toEqual([])
+    expect(hasDslLine(text, `milda ${MILDA_SURFACE_VERSION}`)).toBe(true)
+  })
+
+  it('takes the kind from the header when only the header says it', () => {
+    const r = component('  part Box: control {}')
+    expect(r.issues).toEqual([])
+    expect(r.node('Box')?.kind).toBe('control')
+  })
+
+  it('takes the kind from the statement when only the statement says it', () => {
+    const r = component('  part Box {\n    kind control\n  }')
+    expect(r.issues).toEqual([])
+    expect(r.node('Box')?.kind).toBe('control')
+  })
+
+  it('warns when both say the same kind', () => {
+    const r = component('  part Box: control {\n    kind control\n  }')
+    expect(r.issues).toEqual(['warning part-kind-twice'])
+    expect(r.node('Box')?.kind).toBe('control')
+  })
+
+  it('errors when they disagree, and the header wins', () => {
+    const r = component('  part Box: control {\n    kind text\n  }')
+    expect(r.issues).toEqual(['error part-kind-conflict'])
+    expect(r.node('Box')?.kind).toBe('control')
+  })
+
+  it('reports an unknown header word and still reads the body', () => {
+    const r = component('  part Box: container sealed {\n    layout { stack row }\n  }')
+    expect(r.issues).toEqual(['error part-header-word'])
+    const box = r.node('Box')
+    expect(box?.kind).toBe('container')
+    expect(box?.layout?.direction).toBe('row')
+  })
+
+  it('has no header flag: `locked` after the kind is an unknown header word', () => {
+    // The header shipped without it, so there is no older file to be lenient with.
+    const r = component('  part Box: container locked {}')
+    expect(r.issues).toEqual(['error part-header-word'])
+  })
+
+  it('treats a header kind the language does not know as today’s unknown kind', () => {
+    const r = component('  part Box: widget {}')
+    expect(r.issues).toEqual([])
+    expect(r.irIssues.some((i) => i.includes('unknown kind "widget"'))).toBe(true)
+    expect(r.node('Box')?.kind).not.toBe('widget')
+  })
+
+  it('reports a colon with no kind after it', () => {
+    const r = component('  part Box: {}')
+    expect(r.issues).toEqual(['error part-header-kind'])
+    expect(r.node('Box')).toBeDefined()
+  })
+
+  // The header is not self-delimiting, so a broken one must cost its own line and nothing more:
+  // the measured 0.7 failure was a header that took every following part with it (0055 §5).
+  it('does not let a header with no brace swallow the parts after it', () => {
+    const r = component('  part Box: container\n  part label: text {\n    content "Go"\n  }')
+    expect(r.issues).toContain('error part-lbrace')
+    expect(r.node('label')?.kind).toBe('text')
+  })
+})
+
+// ─── Which parts are locked is the archetype's answer (0055) ──────────────────
+describe('the lock, derived', () => {
+  it('reads an old `locked` and drops it, silently', () => {
+    const said = component(
+      '  part Box: container {}\n  part spinner {\n    kind icon\n    locked\n  }',
+    )
+    const unsaid = component('  part Box: container {}\n  part spinner: icon {}')
+    expect(said.issues).toEqual([])
+    expect(said.components).toEqual(unsaid.components)
+    // `spinner` is not a Button part, so nothing requires it.
+    expect(said.node('spinner')?.locked).toBe(false)
+  })
+
+  it('locks what the archetype requires, whether or not the file wrote it out', () => {
+    const written = component('  part Box: container {}\n  part label: text {}')
+    const left = component('  part Box: container {}')
+    expect(written.node('label')?.locked).toBe(true)
+    expect(left.node('label')?.locked).toBe(true)
+    expect(written.node('Box')?.locked).toBe(true)
+  })
+
+  it('leaves an optional archetype part and an author part free', () => {
+    const r = component(
+      '  part Box: container {}\n  part icon: icon {}\n  part badge: text {\n    origin author\n  }',
+    )
+    expect(r.node('icon')?.locked).toBe(false)
+    expect(r.node('badge')?.locked).toBe(false)
+  })
+
+  it('locks nothing but the root of a component with no archetype', () => {
+    const parsed = parseMildaDocument(
+      'component Card {\n  part Card: container {}\n  part body: container {}\n}\n',
+    )
+    const card = documentToIr(parsed.document).components[0]
+    const nodes = Object.values(card.structure.nodes)
+    expect(nodes.filter((n) => n.locked).map((n) => n.name)).toEqual(['Card'])
   })
 })

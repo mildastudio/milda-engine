@@ -66,6 +66,7 @@ import type {
 import {
   ALL_STATE_NAMES,
   BORDER_SIDES,
+  INSET_EDGE_KEYS,
   formatAxisSize,
   formatPosition,
   parseAxisSize,
@@ -151,6 +152,48 @@ const OUTPUT_PREFIX = 'output.'
 // the closed surface, so the reader and this printer cannot disagree about them.
 // `MILDA_VERSION` is the local alias this file has always used.
 const MILDA_VERSION = MILDA_SURFACE_VERSION
+
+// The surface the part header belongs to. A document keeps the version it declares, so
+// re-exporting an older file does not claim syntax it never used - but every part is printed with
+// its header (`part Button: container {`, proposal 0055), which an older reader loses the
+// component over. A file that says `milda 0.8` and is written in 0.9 is the one lie the version
+// exists to prevent, so a file that PRINTS a part raises an older declared version to this. One
+// that prints none (foundations only) is still what it said it was, and keeps it.
+const PART_HEADER_SURFACE = '0.9'
+const PART_HEADER_LINE = /^\s*part \S+: /
+
+// The same rule for the one-axis and one-edge insets (proposal 0057, surface 0.10). A 0.9 reader
+// loses only the statement, not the part, but a file that says 0.9 and prints `inset.inline` is
+// still the lie the version exists to prevent.
+const INSET_EDGE_SURFACE = '0.10'
+const INSET_EDGE_LINE = /^\s*inset\.[a-z-]+ /
+
+// `a` is older than `b`, segment by segment as numbers (`0.10` is newer than `0.9`).
+function surfaceOlder(a: string, b: string): boolean {
+  const x = a.split('.').map(Number)
+  const y = b.split('.').map(Number)
+  for (let i = 0; i < Math.max(x.length, y.length); i++) {
+    const d = (x[i] ?? 0) - (y[i] ?? 0)
+    if (d !== 0) return d < 0
+  }
+  return false
+}
+
+// The newest surface whose syntax the printed lines actually use, or the declared one if it is
+// newer still. Ordered newest first; each entry is a version and the line shape that needs it.
+const SURFACE_FLOORS: readonly [string, RegExp][] = [
+  [INSET_EDGE_SURFACE, INSET_EDGE_LINE],
+  [PART_HEADER_SURFACE, PART_HEADER_LINE],
+]
+
+function writtenSurface(declared: string | undefined, lines: readonly string[]): string {
+  const v = declared ?? MILDA_VERSION
+  for (const [floor, line] of SURFACE_FLOORS) {
+    if (!surfaceOlder(v, floor)) return v
+    if (lines.some((l) => line.test(l))) return floor
+  }
+  return v
+}
 
 // ─── Small text helpers ───────────────────────────────────────────────────────
 
@@ -982,29 +1025,21 @@ function facetLines(
   // prints literally (the parser reads it as raw).
   if (facets.font) out.push(`${pad(depth)}font ${v('font')}`)
   if (facets.slant) out.push(`${pad(depth)}slant ${facets.slant}`)
-  // The surface spells insets as `inset ‹all›` or `inset ‹block› ‹inline›`, so what it can say
-  // is exactly "one value" or "both axes". An editor document can hold more than that: the axes
-  // beat the shorthand per edge (proposal 0048 §6), so `inset` + `insetX` is four edges with two
-  // values. That IS the two-axis form once the surviving `inset` edges are read as the block
-  // axis, so it prints as one - the edges render identically, only the facet KEY comes back
-  // normalized to `insetY`. Printing the shorthand alone, as this used to, dropped the axis and
-  // silently changed the padding on two edges.
-  const insetBlock = facets.insetY ?? facets.inset
-  const insetInline = facets.insetX ?? facets.inset
-  if (insetBlock && insetInline && insetBlock !== insetInline) {
-    out.push(
-      `${pad(depth)}inset ${facets.insetY ? v('insetY') : v('inset')} ${facets.insetX ? v('insetX') : v('inset')}`,
-    )
-  } else if (facets.inset && !facets.insetX && !facets.insetY) {
-    out.push(`${pad(depth)}inset ${v('inset')}`)
-  } else if (facets.insetY || facets.insetX) {
-    // One axis alone, or two axes carrying the same value. The single-axis case has no surface
-    // syntax at all: `inset ‹one›` reads back as all four edges, which is a real export loss -
-    // `inset-roundtrip.test.ts` records it, and closing it means giving the language a way to
-    // name one axis.
-    const block = facets.insetY ? v('insetY') : undefined
-    const inline = facets.insetX ? v('insetX') : undefined
-    out.push(`${pad(depth)}inset ${[block, inline].filter(Boolean).join(' ')}`)
+  // Insets print the keys that are STORED, least specific first, and never normalize
+  // (proposal 0057 §4.6). The two axes with no shorthand are the corpus form, `inset ‹block›
+  // ‹inline›`; anything else is the shorthand, then each axis, then each edge, as its own
+  // statement. This used to fold `inset` + `insetX` into the two-value form, which rendered the
+  // same but came back with different keys, and to print a lone axis as `inset ‹one›`, which came
+  // back as all four edges - the two export losses `inset-roundtrip.test.ts` recorded.
+  if (facets.insetY && facets.insetX && !facets.inset) {
+    out.push(`${pad(depth)}inset ${v('insetY')} ${v('insetX')}`)
+  } else {
+    if (facets.inset) out.push(`${pad(depth)}inset ${v('inset')}`)
+    if (facets.insetY) out.push(`${pad(depth)}inset.block ${v('insetY')}`)
+    if (facets.insetX) out.push(`${pad(depth)}inset.inline ${v('insetX')}`)
+  }
+  for (const key of INSET_EDGE_KEYS) {
+    if (facets[key]) out.push(`${pad(depth)}${key} ${v(key)}`)
   }
   if (facets.elevation) out.push(`${pad(depth)}elevation ${v('elevation')}`)
   if (facets.opacity) out.push(`${pad(depth)}opacity ${v('opacity')}`)
@@ -1529,9 +1564,14 @@ function emitPart(
 ): string[] {
   const body: string[] = []
 
-  // What the part IS. `kind` was inferred on import before this existed, which turned an
-  // `icon` into an `item` and a `control` into a `container` - the node model, guessed.
-  body.push(`${pad(depth + 1)}kind ${seg(node.kind)}`)
+  // What the part IS, said where it is named (proposal 0055 §3.2): `part Button: container {`.
+  // The kind is printed on EVERY part, never left to the archetype's role: `kind` was inferred on
+  // import before it was written down, which turned an `icon` into an `item` and a `control` into
+  // a `container`, and a role is only a safe default while the prelude keeps it. A saved file
+  // pins what each part is; the header only moves where the pin is written.
+  // Whether the part may be removed is NOT printed: the archetype requires it or it does not,
+  // and the reader asks the archetype (`isLockedPart`).
+  const head = [`part ${path}: ${seg(node.kind)}`]
   // Provenance: an author-added node is not the same as an archetype-born one (the editor
   // gates editing on it), and it is authored information, so the file carries it.
   // Except on the root: the reader takes the first part as the root, and the walk prints the root
@@ -1539,7 +1579,6 @@ function emitPart(
   const rootByPosition = node.origin === 'root' && node.id === ctx.rootId
   if (node.origin && node.origin !== 'archetype' && !rootByPosition)
     body.push(`${pad(depth + 1)}origin ${seg(node.origin)}`)
-  if (node.locked) body.push(`${pad(depth + 1)}locked`)
 
   // Conditional presence (0031/0032): the node renders only when the predicate holds.
   if (node.presence)
@@ -1600,8 +1639,8 @@ function emitPart(
   for (const b of node.behaviors ?? []) body.push(...behaviorLines(b, depth + 1, ctx.addr))
   if (node.foreign) body.push(...foreignLines(node.foreign, depth + 1))
 
-  if (body.length === 0) return [`${pad(depth)}part ${path} {}`]
-  return [`${pad(depth)}part ${path} {`, ...body, `${pad(depth)}}`]
+  if (body.length === 0) return [`${pad(depth)}${head.join(' ')} {}`]
+  return [`${pad(depth)}${head.join(' ')} {`, ...body, `${pad(depth)}}`]
 }
 
 // What a part needs from its component/document to print a reference by NAME rather than
@@ -1770,7 +1809,7 @@ function emitComponent(
   // surface and a panel the first read never had (found by 0052's corpus, whose components are
   // contract-only).
   const tree = lines.slice(treeStart).map((l) => l.trim())
-  const bareRoot = ['', 'part root {', 'kind container', '}']
+  const bareRoot = ['', 'part root: container {}']
   if (
     Object.keys(nodes).length === 1 &&
     tree.length === bareRoot.length &&
@@ -2166,7 +2205,10 @@ export function documentToDsl(input: DslDocumentInput): string {
   out.push('')
 
   // Capability version - a first-class declaration, not a comment (proposal 0026).
-  out.push(`milda ${meta?.milda ?? MILDA_VERSION}`)
+  // Filled in once the file is written: whether it is still the declared version depends on
+  // what the rest of the file says (see `writtenSurface`).
+  const versionLine = out.length
+  out.push('')
   out.push(`prelude ${meta?.prelude ?? PRELUDE_VERSION}`)
   out.push('')
 
@@ -2304,6 +2346,8 @@ export function documentToDsl(input: DslDocumentInput): string {
     out.push(...emitDocs(input.docs, docsRefs(input, componentNames, groupPathById)))
     out.push('')
   }
+
+  out[versionLine] = `milda ${writtenSurface(meta?.milda, out)}`
 
   // Collapse a trailing blank line into a single terminating newline.
   while (out.length && out[out.length - 1] === '') out.pop()

@@ -1,4 +1,4 @@
-import { BORDER_SIDES, FACETS, type BorderSideSuffix, type FacetScale } from './facets'
+import { BORDER_SIDES, FACETS, isInsetKey, type BorderSideSuffix, type FacetScale } from './facets'
 
 // ─── Facet intent: what a facet map MEANS, once (proposal 0048 slice 1) ──────
 // Three targets decided independently that `insetX` feeds left and right, that a border exists
@@ -58,7 +58,20 @@ export interface BorderIntent<T = string> {
   colorFollowsInk: boolean
 }
 
+/**
+ * The four inset edges, LOGICAL (proposal 0057 §4.4): a design system reads the same in a
+ * right-to-left locale. The web tier spells them as logical CSS properties; a target that only
+ * has physical sides asks `insetsPhysical`.
+ */
 export interface EdgeIntent<T = string> {
+  blockStart?: FacetSlot<T>
+  blockEnd?: FacetSlot<T>
+  inlineStart?: FacetSlot<T>
+  inlineEnd?: FacetSlot<T>
+}
+
+/** The four edges as physical sides, for a target that has no logical ones. */
+export interface PhysicalEdgeIntent<T = string> {
   top?: FacetSlot<T>
   right?: FacetSlot<T>
   bottom?: FacetSlot<T>
@@ -121,17 +134,18 @@ export function resolveFacetIntent<T>(
     return { key, value, scale: FACETS[key]?.scale }
   }
 
-  // The axis wins over the shorthand, per edge. `inset` fills all four, `insetX` overrides the
-  // horizontal pair, `insetY` the vertical - so `inset: 4, insetY: 0` is four edges with two
-  // different values, and a stated zero is a value rather than a falsy nothing.
+  // The most specific key wins, per edge (proposal 0057 §4.4): an edge's own key, then its
+  // axis, then the shorthand. So `inset: 4, insetY: 0` is four edges with two values, and
+  // `inset: 4, inset.inline-start: 2` is four edges of which one differs. A stated zero is a
+  // value rather than a falsy nothing.
   const inset = ref('inset')
-  const insetX = ref('insetX')
-  const insetY = ref('insetY')
+  const inline = ref('insetX') ?? inset
+  const block = ref('insetY') ?? inset
   const insets: EdgeIntent<T> = {
-    top: insetY ?? inset,
-    bottom: insetY ?? inset,
-    left: insetX ?? inset,
-    right: insetX ?? inset,
+    blockStart: ref('inset.block-start') ?? block,
+    blockEnd: ref('inset.block-end') ?? block,
+    inlineStart: ref('inset.inline-start') ?? inline,
+    inlineEnd: ref('inset.inline-end') ?? inline,
   }
 
   const borders: BorderIntent<T>[] = []
@@ -181,8 +195,32 @@ export function resolveFacetIntent<T>(
  * it is a question about the intent, so it belongs here rather than being re-derived.
  */
 export function insetsAreUniform<T>(insets: EdgeIntent<T>): boolean {
-  const values = [insets.top, insets.right, insets.bottom, insets.left].map((r) => r?.value)
+  const values = [insets.blockStart, insets.blockEnd, insets.inlineStart, insets.inlineEnd].map(
+    (r) => r?.value,
+  )
   return values.every((v) => v === values[0])
+}
+
+/** Whether both edges of each axis carry one value, so CSS can say `padding-block` / `-inline`. */
+export function insetAxesAreSymmetric<T>(insets: EdgeIntent<T>): boolean {
+  return (
+    insets.blockStart?.value === insets.blockEnd?.value &&
+    insets.inlineStart?.value === insets.inlineEnd?.value
+  )
+}
+
+/**
+ * The logical edges as physical sides, in a horizontal left-to-right system - the assumption
+ * `edgesToPhysical` makes for `pinned` and `bleed` too (proposal 0056 §8). The IR has no writing
+ * direction yet; when it does, this and `edgesToPhysical` are the two places that read it.
+ */
+export function insetsPhysical<T>(insets: EdgeIntent<T>): PhysicalEdgeIntent<T> {
+  return {
+    top: insets.blockStart,
+    right: insets.inlineEnd,
+    bottom: insets.blockEnd,
+    left: insets.inlineStart,
+  }
 }
 
 /**
@@ -240,7 +278,10 @@ export function filledSlots<T>(intent: FacetIntent<T>): FacetSlotName[] {
   add('corner', intent.corner)
   add(
     'insets',
-    intent.insets.top ?? intent.insets.right ?? intent.insets.bottom ?? intent.insets.left,
+    intent.insets.blockStart ??
+      intent.insets.blockEnd ??
+      intent.insets.inlineStart ??
+      intent.insets.inlineEnd,
   )
   add('gap', intent.gap)
   add('opacity', intent.opacity)
@@ -278,4 +319,83 @@ export function unsupportedSlots<T>(
     if (reason) out.push({ slot, reason })
   }
   return out
+}
+
+// ─── The cascade: a later layer wins per EDGE, not per key (proposal 0057 §4.5) ──
+// A node's facets are its base map with each matching state rule laid over it. Laying them over
+// KEY BY KEY was wrong wherever one idea has keys of different reach - an inset on all four edges,
+// one axis, or one edge; a border on all sides or one. A base `insetX: 4` under a hover rule's
+// `inset: 8` merged to `{ insetX: 4, inset: 8 }`, and the axis then beat the shorthand: the
+// Studio preview and the Mac canvas drew 8/4/8/4 on hover. The generated React emits the rule
+// into its own `:hover` selector, where the browser lets `padding: 8px` override the base's
+// `padding-inline` - 8 everywhere, which is what the author wrote. Two targets, two answers.
+//
+// The rule now matches the browser: a layer's key SHADOWS every earlier key of the same idea
+// whose edges it fully covers. Within one layer the most specific key still wins (§4.4), and
+// that is also what the web tier emits, so the merged map means exactly what the CSS computes.
+
+type Edge = 'block-start' | 'block-end' | 'inline-start' | 'inline-end'
+
+const ALL_EDGES: readonly Edge[] = ['block-start', 'block-end', 'inline-start', 'inline-end']
+
+const INSET_REACH: Record<string, readonly Edge[]> = {
+  inset: ALL_EDGES,
+  insetX: ['inline-start', 'inline-end'],
+  insetY: ['block-start', 'block-end'],
+  'inset.block-start': ['block-start'],
+  'inset.block-end': ['block-end'],
+  'inset.inline-start': ['inline-start'],
+  'inset.inline-end': ['inline-end'],
+}
+
+// Border sides: physical sides read as the logical edge they name left to right, the same
+// assumption `insetsPhysical` makes. The browser resolves `border-top` and `border-block-start`
+// into one cascade the same way.
+const BORDER_REACH: Record<BorderSideSuffix, readonly Edge[]> = {
+  '': ALL_EDGES,
+  '.top': ['block-start'],
+  '.right': ['inline-end'],
+  '.bottom': ['block-end'],
+  '.left': ['inline-start'],
+  '.inline-start': ['inline-start'],
+  '.inline-end': ['inline-end'],
+  '.block-start': ['block-start'],
+  '.block-end': ['block-end'],
+}
+
+const BORDER_KEY = /^border((?:\.[a-z-]+)?)\.(width|color|style)$/
+
+/** Which idea a facet key belongs to and which edges it reaches, or undefined for a key that
+ *  has no edges (a fill, a corner) and is simply replaced. */
+export function facetReach(key: string): { group: string; edges: readonly Edge[] } | undefined {
+  if (isInsetKey(key)) return { group: 'inset', edges: INSET_REACH[key]! }
+  const m = BORDER_KEY.exec(key)
+  if (m) {
+    const edges = BORDER_REACH[m[1] as BorderSideSuffix]
+    if (edges) return { group: `border.${m[2]}`, edges }
+  }
+  return undefined
+}
+
+/**
+ * `layer` laid over `base`: every key of `layer` replaces its own name, and also removes each
+ * earlier key of the same group whose edges it covers. Pure; neither argument is changed.
+ */
+export function overlayFacets(
+  base: Record<string, string>,
+  layer: Record<string, string> | undefined,
+): Record<string, string> {
+  if (!layer) return base
+  const out = { ...base }
+  for (const key of Object.keys(layer)) {
+    const reach = facetReach(key)
+    if (!reach) continue
+    for (const earlier of Object.keys(out)) {
+      if (earlier === key) continue
+      const r = facetReach(earlier)
+      if (r && r.group === reach.group && r.edges.every((e) => reach.edges.includes(e)))
+        delete out[earlier]
+    }
+  }
+  return Object.assign(out, layer)
 }

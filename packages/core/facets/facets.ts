@@ -1,4 +1,4 @@
-import { COLOR_KEYWORDS } from '@mildastudio/milda'
+import { COLOR_KEYWORDS, type InsetEdge } from '@mildastudio/milda'
 import { resolveColorToken } from '../foundations/colorTokens'
 import { resolveScaleToken, type ScaleName } from '../foundations/scales'
 import type { NodeKind } from '../structure/types'
@@ -35,14 +35,54 @@ export const BORDER_SIDES = [
 
 export type BorderSideSuffix = (typeof BORDER_SIDES)[number]['suffix']
 
+// ─── Inset keys (proposal 0057) ───
+// An inset is stated on all four edges, on one axis, or on one edge, and the more specific key
+// wins edge by edge (`resolveFacetIntent`). The axes keep the names they were stored under
+// before the edges existed - `insetX` is the inline axis, `insetY` the block axis - because
+// renaming a stored key is a migration plus a change in what an old client's mutation writes
+// (invariant 7), and it buys nothing. The surface spells them `inset.inline` / `inset.block`;
+// `INSET_SURFACE_KEYS` is the one table between the two spellings.
+export const INSET_EDGE_KEYS = [
+  'inset.block-start',
+  'inset.block-end',
+  'inset.inline-start',
+  'inset.inline-end',
+] as const
+
+/** Every facet key that states an inset, least specific first. */
+export const INSET_KEYS = ['inset', 'insetX', 'insetY', ...INSET_EDGE_KEYS] as const
+
+export type InsetKey = (typeof INSET_KEYS)[number]
+
+/** The surface's dotted inset names (`inset.<edge>`) to the IR keys they are stored under. */
+export const INSET_SURFACE_KEYS: Record<InsetEdge, InsetKey> = {
+  block: 'insetY',
+  inline: 'insetX',
+  'block-start': 'inset.block-start',
+  'block-end': 'inset.block-end',
+  'inline-start': 'inset.inline-start',
+  'inline-end': 'inset.inline-end',
+}
+
+export function isInsetKey(key: string): key is InsetKey {
+  return (INSET_KEYS as readonly string[]).includes(key)
+}
+
 export const FACETS: Record<string, FacetDef> = {
   fill: { key: 'fill', label: 'Fill', scale: 'color' },
   ink: { key: 'ink', label: 'Ink', scale: 'color' },
   corner: { key: 'corner', label: 'Corner', scale: 'radius' },
   inset: { key: 'inset', label: 'Inset', scale: 'spacing' },
-
-  insetX: { key: 'insetX', label: 'Inset X', scale: 'spacing' },
-  insetY: { key: 'insetY', label: 'Inset Y', scale: 'spacing' },
+  insetX: { key: 'insetX', label: 'Inset inline', scale: 'spacing' },
+  insetY: { key: 'insetY', label: 'Inset block', scale: 'spacing' },
+  'inset.block-start': { key: 'inset.block-start', label: 'Inset block start', scale: 'spacing' },
+  'inset.block-end': { key: 'inset.block-end', label: 'Inset block end', scale: 'spacing' },
+  'inset.inline-start': {
+    key: 'inset.inline-start',
+    label: 'Inset inline start',
+    scale: 'spacing',
+  },
+  'inset.inline-end': { key: 'inset.inline-end', label: 'Inset inline end', scale: 'spacing' },
   gap: { key: 'gap', label: 'Gap', scale: 'spacing' },
   'border.width': { key: 'border.width', label: 'Border width', scale: 'borderWidth' },
   'border.color': { key: 'border.color', label: 'Border color', scale: 'color' },
@@ -80,9 +120,7 @@ export const KIND_FACETS: Record<NodeKind, string[]> = {
   container: [
     'fill',
     'corner',
-    'inset',
-    'insetX',
-    'insetY',
+    ...INSET_KEYS,
     'gap',
     'border.width',
     'border.color',
@@ -90,14 +128,12 @@ export const KIND_FACETS: Record<NodeKind, string[]> = {
     'opacity',
     'ring',
   ],
-  item: ['fill', 'ink', 'corner', 'inset', 'insetX', 'insetY', 'gap', 'ring'],
+  item: ['fill', 'ink', 'corner', ...INSET_KEYS, 'gap', 'ring'],
   control: [
     'fill',
     'ink',
     'corner',
-    'inset',
-    'insetX',
-    'insetY',
+    ...INSET_KEYS,
     'border.width',
     'border.color',
     'text.weight',
@@ -110,15 +146,13 @@ export const KIND_FACETS: Record<NodeKind, string[]> = {
     'fill',
     'ink',
     'corner',
-    'inset',
-    'insetX',
-    'insetY',
+    ...INSET_KEYS,
     'border.width',
     'border.color',
     'text.size',
     'ring',
   ],
-  output: ['fill', 'ink', 'corner', 'inset', 'text.size', 'text.weight', 'font', 'slant'],
+  output: ['fill', 'ink', 'corner', ...INSET_KEYS, 'text.size', 'text.weight', 'font', 'slant'],
   text: ['ink', 'text.size', 'text.weight', 'font', 'slant'],
   icon: ['fill', 'corner'],
   content: ['corner', 'opacity'],
@@ -131,7 +165,7 @@ export const KIND_FACETS: Record<NodeKind, string[]> = {
   cell: [
     'fill',
     'ink',
-    'inset',
+    ...INSET_KEYS,
     'border.width',
     'border.color',
     'text.size',

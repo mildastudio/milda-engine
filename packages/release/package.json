@@ -1,6 +1,6 @@
 {
   "name": "@mildastudio/release",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -29,11 +29,11 @@
     "build": "tsdown index.ts --format esm,cjs --dts --clean"
   },
   "dependencies": {
-    "@mildastudio/core": "^0.2.0",
-    "@mildastudio/generate": "^0.2.0"
+    "@mildastudio/core": "^0.3.0",
+    "@mildastudio/generate": "^0.3.0"
   },
   "devDependencies": {
-    "@mildastudio/milda": "^0.2.0",
+    "@mildastudio/milda": "^0.3.0",
     "tsdown": "^0.22.14",
     "typescript": "^7.0.2"
   }

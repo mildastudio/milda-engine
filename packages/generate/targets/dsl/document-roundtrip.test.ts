@@ -474,7 +474,7 @@ foundations {
     // An export from the editor, where nothing carries a version yet - so the printer's default
     // is what the file claims.
     const fresh = documentToDsl({ components: [], foundations: first.ir.foundations })
-    expect(fresh).toMatch(/^milda 0\.8$/m)
+    expect(fresh).toMatch(/^milda 0\.10$/m)
   })
 
   // Only the DEFAULT moved. A file that carries its own version keeps it (the header is read and
@@ -483,14 +483,33 @@ foundations {
     expect(toDsl(toIr(`milda 0.4\n${SOURCE}`))).toMatch(/^milda 0\.4$/m)
   })
 
+  // ...until the printer writes something the declared version cannot say. Every part is printed
+  // with its header (0055), and a 0.8 reader loses the component over one, so a file that prints
+  // a part claims the header's surface however old the document it came from.
+  it('raises a declared version the printed part headers do not fit', () => {
+    const withPart = `milda 0.4\n${SOURCE}\ncomponent Box {\n  part Box {\n    kind container\n  }\n}\n`
+    const out = toDsl(toIr(withPart))
+    expect(out).toMatch(/^milda 0\.9$/m)
+    expect(out).toMatch(/^\s*part Box: container \{\}$/m)
+  })
+
+  // The same for an inset on one axis or one edge (proposal 0057, 0.10): a 0.9 reader would skip
+  // the statement, so a file that prints one says the surface that has it.
+  it('raises a declared version the printed inset edges do not fit', () => {
+    const withEdge = `milda 0.4\n${SOURCE}\ncomponent Box {\n  part Box {\n    kind container\n    inset.inline-start 4px\n  }\n}\n`
+    const out = toDsl(toIr(withEdge))
+    expect(out).toMatch(/^milda 0\.10$/m)
+    expect(out).toMatch(/^\s*inset\.inline-start 4px$/m)
+  })
+
   // A file with NO header is not a 0.1 file, it is a file that did not say. The parser used to
   // invent `0.1` for it, which the printer then stamped on as though the document had claimed
   // it - false for every file in the `docs/dsl/` corpus, none of which carries a header while
   // all of them use current syntax. Absent now means "the current surface", the same default an
   // editor export gets.
   it('gives a header-less document the current surface, not an invented old one', () => {
-    expect(printed).toMatch(/^milda 0\.8$/m)
-    expect(toDsl(toIr(SOURCE))).toMatch(/^milda 0\.8$/m)
+    expect(printed).toMatch(/^milda 0\.10$/m)
+    expect(toDsl(toIr(SOURCE))).toMatch(/^milda 0\.10$/m)
   })
 
   // The other half of the promise the version makes: a reader that meets a word from a LATER

@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest'
-import { borderStyleKeyword, insetsAreUniform, resolveFacetIntent } from './intent'
+import {
+  borderStyleKeyword,
+  facetReach,
+  insetAxesAreSymmetric,
+  insetsAreUniform,
+  insetsPhysical,
+  overlayFacets,
+  resolveFacetIntent,
+} from './intent'
 
 // ─── 0048 slice 1 ────────────────────────────────────────────────────────────
 // These assert the decisions that used to live three times over. Each one is written from the
@@ -7,31 +15,41 @@ import { borderStyleKeyword, insetsAreUniform, resolveFacetIntent } from './inte
 // reason they drifted is that nothing ever stated the rules apart from a renderer.
 
 describe('insets', () => {
+  const edges = (facets: Record<string, string>) => {
+    const { insets } = resolveFacetIntent(facets)
+    return [insets.blockStart, insets.blockEnd, insets.inlineStart, insets.inlineEnd].map(
+      (r) => r?.value,
+    )
+  }
+
   it('spreads the shorthand to all four edges', () => {
-    const { insets } = resolveFacetIntent({ inset: 'space-2' })
-    expect([insets.top, insets.right, insets.bottom, insets.left].map((r) => r?.value)).toEqual([
-      'space-2',
-      'space-2',
-      'space-2',
-      'space-2',
-    ])
+    expect(edges({ inset: 'space-2' })).toEqual(['space-2', 'space-2', 'space-2', 'space-2'])
   })
 
   it('lets an axis override the shorthand on its own edges only', () => {
-    const { insets } = resolveFacetIntent({ inset: 'space-4', insetY: 'space-1' })
-    expect(insets.left?.value).toBe('space-4')
-    expect(insets.right?.value).toBe('space-4')
-    expect(insets.top?.value).toBe('space-1')
-    expect(insets.bottom?.value).toBe('space-1')
+    expect(edges({ inset: 'space-4', insetY: 'space-1' })).toEqual([
+      'space-1',
+      'space-1',
+      'space-4',
+      'space-4',
+    ])
   })
 
   // The `??` vs `||` trap that has its own comment in kernel/render.ts: a deliberate zero is a
   // value. Written as a raw '0' because that is what an author who wants no padding produces.
   it('treats a stated zero as a value, not as absence', () => {
-    const { insets } = resolveFacetIntent({ inset: 'space-4', insetX: '0' })
-    expect(insets.left?.value).toBe('0')
-    expect(insets.right?.value).toBe('0')
-    expect(insets.top?.value).toBe('space-4')
+    expect(edges({ inset: 'space-4', insetX: '0' })).toEqual(['space-4', 'space-4', '0', '0'])
+  })
+
+  // Proposal 0057 §4.4: an edge's own key, then its axis, then the shorthand.
+  it('lets one edge override its axis and the shorthand', () => {
+    expect(edges({ inset: 'a', insetX: 'b', 'inset.inline-start': 'c' })).toEqual([
+      'a',
+      'a',
+      'c',
+      'b',
+    ])
+    expect(edges({ 'inset.block-end': '0' })).toEqual([undefined, '0', undefined, undefined])
   })
 
   it('says when the four edges agree, so a shorthand can be used', () => {
@@ -40,9 +58,102 @@ describe('insets', () => {
     expect(insetsAreUniform(resolveFacetIntent({}).insets)).toBe(true) // all absent
   })
 
+  it('says when each axis is symmetric, so the axis shorthands can be used', () => {
+    const sym = (f: Record<string, string>) => insetAxesAreSymmetric(resolveFacetIntent(f).insets)
+    expect(sym({ insetX: 'a', insetY: 'b' })).toBe(true)
+    expect(sym({ insetX: 'a' })).toBe(true)
+    expect(sym({ insetX: 'a', 'inset.inline-end': 'b' })).toBe(false)
+  })
+
+  it('maps the logical edges to physical sides left to right, for the non-web targets', () => {
+    const sides = insetsPhysical(
+      resolveFacetIntent({ 'inset.inline-start': 's', 'inset.block-end': 'e' }).insets,
+    )
+    expect(sides.left?.value).toBe('s')
+    expect(sides.bottom?.value).toBe('e')
+    expect(sides.right).toBeUndefined()
+    expect(sides.top).toBeUndefined()
+  })
+
   it('carries the scale each edge reads on, so a target need not look it up', () => {
-    const { insets } = resolveFacetIntent({ insetX: 'space-2' })
-    expect(insets.left?.scale).toBe('spacing')
+    const { insets } = resolveFacetIntent({ insetX: 'space-2', 'inset.block-start': 'space-1' })
+    expect(insets.inlineStart?.scale).toBe('spacing')
+    expect(insets.blockStart?.scale).toBe('spacing')
+  })
+})
+
+// ─── 0057 §4.5: a later layer wins per edge, not per key ─────────────────────
+// The browser's answer, which the generated React already gets by emitting each rule into its
+// own selector. `overlayFacets` is what the Studio preview, the Mac canvas and the Figma scene go
+// through (via `resolveNodeFacets`), so these are the cases on which they used to disagree.
+describe('overlayFacets', () => {
+  const hovered = (base: Record<string, string>, rule: Record<string, string>) => {
+    const { insets } = resolveFacetIntent(overlayFacets(base, rule))
+    return [insets.blockStart, insets.blockEnd, insets.inlineStart, insets.inlineEnd].map(
+      (r) => r?.value,
+    )
+  }
+
+  it('a rule shorthand overrides a base axis (the measured 2026-11-02 case)', () => {
+    expect(hovered({ insetX: '4px' }, { inset: '8px' })).toEqual(['8px', '8px', '8px', '8px'])
+  })
+
+  it('a rule axis overrides a base edge on that axis', () => {
+    expect(hovered({ 'inset.inline-start': '2px' }, { insetX: '4px' })).toEqual([
+      undefined,
+      undefined,
+      '4px',
+      '4px',
+    ])
+  })
+
+  it('a rule edge leaves the rest of a base axis alone', () => {
+    expect(hovered({ insetX: '4px' }, { 'inset.inline-start': '8px' })).toEqual([
+      undefined,
+      undefined,
+      '8px',
+      '4px',
+    ])
+  })
+
+  it('a rule axis leaves the other axis of the base shorthand alone', () => {
+    expect(hovered({ inset: '2px', insetX: '4px' }, { insetY: '8px' })).toEqual([
+      '8px',
+      '8px',
+      '4px',
+      '4px',
+    ])
+  })
+
+  it('a rule border overrides a base side border on the same part of the border', () => {
+    const merged = overlayFacets(
+      { 'border.top.width': '4px', 'border.top.color': 'red' },
+      { 'border.width': '1px' },
+    )
+    expect(merged['border.top.width']).toBeUndefined()
+    expect(merged['border.top.color']).toBe('red') // the colour was not restated
+    expect(merged['border.width']).toBe('1px')
+  })
+
+  it('a physical and a logical side reaching the same edge shadow each other', () => {
+    const merged = overlayFacets(
+      { 'border.block-start.width': '4px' },
+      { 'border.top.width': '1px' },
+    )
+    expect(merged).toEqual({ 'border.top.width': '1px' })
+  })
+
+  it('keys with no edges are simply replaced', () => {
+    expect(overlayFacets({ fill: 'a', inset: 'x' }, { fill: 'b' })).toEqual({
+      fill: 'b',
+      inset: 'x',
+    })
+  })
+
+  it('reports the reach of each key it shadows by', () => {
+    expect(facetReach('insetX')).toEqual({ group: 'inset', edges: ['inline-start', 'inline-end'] })
+    expect(facetReach('border.left.color')?.edges).toEqual(['inline-start'])
+    expect(facetReach('fill')).toBeUndefined()
   })
 })
 

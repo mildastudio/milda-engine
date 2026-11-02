@@ -9,6 +9,7 @@ import type {
 } from './types'
 import { type ItemScope } from './binding'
 import { evalPredicate, representablePredicate } from './predicate'
+import { overlayFacets } from '../facets/intent'
 
 // A StateRule whose rich `when` (0032) can't become a static CSS selector (OR/NOT/operators/
 // context) - the CSS target realizes it as a `[data-cond-<id>]` attribute the React generator
@@ -153,7 +154,7 @@ export function resolveNodeFacets(
   let facets = { ...(node.facets ?? {}) }
   for (const rule of node.states ?? []) {
     if (ruleMatches(rule, activeProps, activeStates, ancestorStates, contexts))
-      facets = { ...facets, ...(rule.facets ?? {}) }
+      facets = overlayFacets(facets, rule.facets)
   }
   return facets
 }
