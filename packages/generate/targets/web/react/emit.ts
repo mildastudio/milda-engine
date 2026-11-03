@@ -166,7 +166,10 @@ export interface EmitOptions {
 // release layer may override it (e.g. `${scope}/behavior`) via EmitOptions.behaviorPackage.
 export const BEHAVIOR_PACKAGE_DEFAULT = '@mildastudio/ds-behavior'
 
-const ROOT_ELEMENT: Record<string, string> = {
+// Exported for the conformance checker (proposal 0053 §2.2), which inverts it: a raw
+// `<button>` in a consumer's code is a finding only because THIS table says the library's
+// Button renders one.
+export const ROOT_ELEMENT: Readonly<Record<string, string>> = {
   Button: 'button',
   ToggleButton: 'button',
   Link: 'a',
@@ -243,6 +246,15 @@ function pascalCase(base: string): string {
     .filter(Boolean)
     .map((p) => p[0].toUpperCase() + p.slice(1))
     .join('')
+}
+
+/**
+ * The identifier a contract prop is written as in the generated API. Exported so a
+ * reader of consumer code (the 0053 checker) matches `isOpen` against the prop authored
+ * as "is open" by the same rule that printed it, rather than a second guess at one.
+ */
+export function propIdentifier(name: string): string {
+  return camelCase(name)
 }
 
 function camelCase(base: string): string {

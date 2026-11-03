@@ -251,6 +251,8 @@ export * from './targets/behavior'
 export {
   resolveTag,
   componentName,
+  propIdentifier,
+  ROOT_ELEMENT,
   componentUsesContext,
   toComponentSource,
   toComponentStyles,
